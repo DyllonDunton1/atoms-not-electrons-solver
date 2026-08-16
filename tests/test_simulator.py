@@ -1,31 +1,31 @@
-"""Tests for local movement validation and simulation."""
+"""Tests for local movement, picking, and fulfillment simulation."""
 
 import unittest
 
-from src.models import Action, ActionType, Pallet, ProblemInstance, Robot
+from src.models import Action, ActionType, Order, Pallet, ProblemInstance, Robot
 from src.simulator import SimulationError, Simulator
 from src.world import WorldState
 
 
-def make_pallet(pallet_id, position):
-    """Create a full synthetic pallet used as a movement obstacle."""
+def make_pallet(pallet_id, position, sku=0, count=10):
+    """Create a synthetic pallet used by simulator tests."""
     return Pallet(
         pallet_id=pallet_id,
         position=position,
-        sku=0,
-        count=10,
+        sku=sku,
+        count=count,
         max_count=10,
         original_position=position,
     )
 
 
-def make_world(robots=None, pallets=None):
-    """Create a small valid world for movement tests."""
+def make_world(robots=None, pallets=None, orders=None):
+    """Create a small valid world for simulator tests."""
     problem = ProblemInstance(
         robots=robots or [],
-        sku_capacities=[10],
+        sku_capacities=[10] * 10,
         pallets=pallets or [],
-        orders=[],
+        orders=orders or [],
     )
     return WorldState(problem)
 
@@ -162,7 +162,7 @@ class TestSimulatorStep(unittest.TestCase):
             simulator.step(
                 [
                     Action(0, 0, ActionType.MOVE, (6, 5)),
-                    Action(0, 0, ActionType.MOVE, (5, 6)),
+                    Action(0, 0, ActionType.PICK, (5, 6)),
                 ]
             )
 
@@ -180,12 +180,12 @@ class TestSimulatorStep(unittest.TestCase):
         with self.assertRaisesRegex(SimulationError, "Unknown robot id 9"):
             simulator.step([Action(0, 9, ActionType.MOVE, (6, 5))])
 
-    def test_rejects_non_move_action_for_now(self):
+    def test_rejects_docking_actions_for_now(self):
         world = make_world([Robot(0, (5, 5))])
         simulator = Simulator(world)
 
-        with self.assertRaisesRegex(SimulationError, "movement-only simulator"):
-            simulator.step([Action(0, 0, ActionType.PICK, (6, 5))])
+        with self.assertRaisesRegex(SimulationError, "not supported yet"):
+            simulator.step([Action(0, 0, ActionType.DOCK, (6, 5))])
 
     def test_failed_step_does_not_partially_move_robots(self):
         world = make_world(
@@ -204,6 +204,190 @@ class TestSimulatorStep(unittest.TestCase):
         self.assertEqual(world.robots[0].position, (1, 1))
         self.assertEqual(world.robots[1].position, (10, 10))
         self.assertEqual(world.timestep, 0)
+
+
+class TestPicking(unittest.TestCase):
+    def test_pick_decrements_stock_and_adds_sku_to_storage(self):
+        pallet = make_pallet(0, (6, 5), sku=4, count=2)
+        world = make_world([Robot(0, (5, 5))], [pallet])
+        simulator = Simulator(world)
+
+        simulator.step([Action(0, 0, ActionType.PICK, (6, 5))])
+
+        self.assertEqual(world.pallets[0].count, 1)
+        self.assertEqual(world.robots[0].storage, [4])
+        self.assertEqual(world.robots[0].position, (5, 5))
+
+    def test_rejects_non_adjacent_pick(self):
+        pallet = make_pallet(0, (8, 5), sku=4)
+        world = make_world([Robot(0, (5, 5))], [pallet])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "not adjacent"):
+            simulator.step([Action(0, 0, ActionType.PICK, (8, 5))])
+
+        self.assertEqual(world.pallets[0].count, 10)
+        self.assertEqual(world.robots[0].storage, [])
+        self.assertEqual(world.timestep, 0)
+
+    def test_rejects_pick_when_target_has_no_pallet(self):
+        world = make_world([Robot(0, (5, 5))])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "no pallet is there"):
+            simulator.step([Action(0, 0, ActionType.PICK, (6, 5))])
+
+    def test_rejects_empty_pallet_pick(self):
+        pallet = make_pallet(0, (6, 5), sku=4, count=0)
+        world = make_world([Robot(0, (5, 5))], [pallet])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "0 items"):
+            simulator.step([Action(0, 0, ActionType.PICK, (6, 5))])
+
+        self.assertEqual(world.pallets[0].count, 0)
+        self.assertEqual(world.robots[0].storage, [])
+        self.assertEqual(world.timestep, 0)
+
+    def test_multiple_robots_can_pick_same_pallet_when_stock_is_sufficient(self):
+        pallet = make_pallet(0, (5, 5), sku=4, count=2)
+        world = make_world(
+            [Robot(0, (4, 5)), Robot(1, (5, 4))],
+            [pallet],
+        )
+        simulator = Simulator(world)
+
+        simulator.step(
+            [
+                Action(0, 0, ActionType.PICK, (5, 5)),
+                Action(0, 1, ActionType.PICK, (5, 5)),
+            ]
+        )
+
+        self.assertEqual(world.pallets[0].count, 0)
+        self.assertEqual(world.robots[0].storage, [4])
+        self.assertEqual(world.robots[1].storage, [4])
+
+    def test_rejects_combined_picks_that_exceed_stock_without_partial_mutation(self):
+        pallet = make_pallet(0, (5, 5), sku=4, count=1)
+        world = make_world(
+            [Robot(0, (4, 5)), Robot(1, (5, 4))],
+            [pallet],
+        )
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "1 items but 2 picks"):
+            simulator.step(
+                [
+                    Action(0, 0, ActionType.PICK, (5, 5)),
+                    Action(0, 1, ActionType.PICK, (5, 5)),
+                ]
+            )
+
+        self.assertEqual(world.pallets[0].count, 1)
+        self.assertEqual(world.robots[0].storage, [])
+        self.assertEqual(world.robots[1].storage, [])
+        self.assertEqual(world.timestep, 0)
+
+
+class TestFulfillment(unittest.TestCase):
+    def test_exact_match_fulfills_order_and_clears_storage(self):
+        robot = Robot(0, (12, 0), storage=[7, 4, 4])
+        order = Order(0, [4, 4, 7])
+        world = make_world([robot], orders=[order])
+        simulator = Simulator(world)
+
+        # Challenge rules ignore the coordinates on a fulfill action.
+        simulator.step([Action(0, 0, ActionType.FULFILL, (99, 99))])
+
+        self.assertTrue(world.orders[0].fulfilled)
+        self.assertEqual(world.robots[0].storage, [])
+        self.assertEqual(world.robots[0].position, (12, 0))
+
+    def test_rejects_fulfillment_when_one_item_is_missing(self):
+        robot = Robot(0, (12, 0), storage=[4, 7])
+        order = Order(0, [4, 4, 7])
+        world = make_world([robot], orders=[order])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "does not exactly match"):
+            simulator.step([Action(0, 0, ActionType.FULFILL, (0, 0))])
+
+        self.assertFalse(world.orders[0].fulfilled)
+        self.assertEqual(world.robots[0].storage, [4, 7])
+
+    def test_rejects_fulfillment_when_one_extra_item_exists(self):
+        robot = Robot(0, (12, 0), storage=[4, 4, 7, 9])
+        order = Order(0, [4, 4, 7])
+        world = make_world([robot], orders=[order])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "does not exactly match"):
+            simulator.step([Action(0, 0, ActionType.FULFILL, (0, 0))])
+
+        self.assertFalse(world.orders[0].fulfilled)
+        self.assertEqual(world.robots[0].storage, [4, 4, 7, 9])
+
+    def test_rejects_fulfillment_away_from_top_row(self):
+        robot = Robot(0, (12, 1), storage=[4, 4, 7])
+        order = Order(0, [4, 4, 7])
+        world = make_world([robot], orders=[order])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "must be on y=0"):
+            simulator.step([Action(0, 0, ActionType.FULFILL, (0, 0))])
+
+    def test_fulfillment_ignores_already_fulfilled_order(self):
+        robot = Robot(0, (12, 0), storage=[4, 4, 7])
+        order = Order(0, [4, 4, 7], fulfilled=True)
+        world = make_world([robot], orders=[order])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "available unfulfilled order"):
+            simulator.step([Action(0, 0, ActionType.FULFILL, (0, 0))])
+
+    def test_two_robots_cannot_claim_the_same_single_order(self):
+        robots = [
+            Robot(0, (10, 0), storage=[4, 4, 7]),
+            Robot(1, (20, 0), storage=[7, 4, 4]),
+        ]
+        order = Order(0, [4, 4, 7])
+        world = make_world(robots, orders=[order])
+        simulator = Simulator(world)
+
+        with self.assertRaisesRegex(SimulationError, "available unfulfilled order"):
+            simulator.step(
+                [
+                    Action(0, 0, ActionType.FULFILL, (0, 0)),
+                    Action(0, 1, ActionType.FULFILL, (0, 0)),
+                ]
+            )
+
+        self.assertFalse(world.orders[0].fulfilled)
+        self.assertEqual(world.robots[0].storage, [4, 4, 7])
+        self.assertEqual(world.robots[1].storage, [7, 4, 4])
+        self.assertEqual(world.timestep, 0)
+
+    def test_two_identical_orders_can_be_fulfilled_simultaneously(self):
+        robots = [
+            Robot(0, (10, 0), storage=[4, 4, 7]),
+            Robot(1, (20, 0), storage=[7, 4, 4]),
+        ]
+        orders = [Order(0, [4, 4, 7]), Order(1, [7, 4, 4])]
+        world = make_world(robots, orders=orders)
+        simulator = Simulator(world)
+
+        simulator.step(
+            [
+                Action(0, 0, ActionType.FULFILL, (0, 0)),
+                Action(0, 1, ActionType.FULFILL, (0, 0)),
+            ]
+        )
+
+        self.assertTrue(world.orders[0].fulfilled)
+        self.assertTrue(world.orders[1].fulfilled)
+        self.assertEqual(world.robots[0].storage, [])
+        self.assertEqual(world.robots[1].storage, [])
 
 
 class TestSimulatorRun(unittest.TestCase):
