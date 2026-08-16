@@ -1,13 +1,22 @@
 """Tests for shortest-path planning and robot footprints."""
 
 from collections import deque
+from pathlib import Path
 from random import Random
 from typing import Iterable, Optional, Set
 import unittest
 
 from src.models import Pallet, Position, ProblemInstance
+from src.parser import parse_problem
 from src.pathfinding import PathPlanner
 from src.world import WorldState
+
+
+BIG_ORDER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "source_material"
+    / "BIG_ORDER.txt"
+)
 
 
 def make_world(pallets=None) -> WorldState:
@@ -178,6 +187,49 @@ class TestPathPlanner(unittest.TestCase):
                     msg=f"A* was non-optimal on random case {case_number}",
                 )
                 assert_valid_path(self, path, blocked=blocked)
+
+
+class TestRealWarehousePaths(unittest.TestCase):
+    """Exercise A* against the actual BIG_ORDER pallet layout."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        problem = parse_problem(BIG_ORDER_PATH)
+        cls.world = WorldState(problem)
+        cls.planner = PathPlanner(cls.world)
+        cls.pallet_positions = {
+            pallet.position for pallet in cls.world.pallets.values()
+        }
+
+    def test_open_aisle_routes_match_manhattan_distance(self) -> None:
+        cases = [
+            ((34, 15), (34, 0), 15),
+            ((21, 23), (21, 39), 16),
+            ((35, 29), (35, 0), 29),
+            ((8, 19), (8, 0), 19),
+        ]
+
+        for start, goal, expected_moves in cases:
+            with self.subTest(start=start, goal=goal):
+                path = self.planner.find_path(start, goal)
+                self.assertEqual(path[0], start)
+                self.assertEqual(path[-1], goal)
+                self.assertEqual(len(path) - 1, expected_moves)
+                assert_valid_path(self, path, blocked=self.pallet_positions)
+
+    def test_real_pallet_column_forces_shortest_detour(self) -> None:
+        # Robot 0 starts at (25, 22). The top pallet block occupies x=25
+        # from y=7 through y=16, so reaching (25, 0) needs a two-step
+        # horizontal detour around that column.
+        start = (25, 22)
+        goal = (25, 0)
+        path = self.planner.find_path(start, goal)
+
+        self.assertEqual(path[0], start)
+        self.assertEqual(path[-1], goal)
+        self.assertEqual(len(path) - 1, 24)
+        self.assertGreater(len(path) - 1, self.planner._manhattan(start, goal))
+        assert_valid_path(self, path, blocked=self.pallet_positions)
 
 
 if __name__ == "__main__":
