@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Counter as CounterType
+from typing import List, Optional, Tuple
 
 
-Position = tuple[int, int]
+Position = Tuple[int, int]
 
 
 class ActionType(str, Enum):
@@ -39,29 +39,29 @@ class Pallet:
     count: int
     max_count: int
     original_position: Position
-    docked_to: int | None = None
+    docked_to: Optional[int] = None
 
 
 @dataclass
 class Order:
     order_id: int
-    skus: list[int]
+    skus: List[int]
     fulfilled: bool = False
-    assigned_robot: int | None = None
+    assigned_robot: Optional[int] = None
 
 
 @dataclass
 class Robot:
     robot_id: int
     position: Position
-    storage: list[int] = field(default_factory=list)
-    docked_pallets: list[int] = field(default_factory=list)
-    current_order: int | None = None
+    storage: List[int] = field(default_factory=list)
+    docked_pallets: List[int] = field(default_factory=list)
+    current_order: Optional[int] = None
 
 
 @dataclass
 class ProblemInstance:
-    robots: list[Robot]
-    sku_capacities: list[int]
-    pallets: list[Pallet]
-    orders: list[Order]
+    robots: List[Robot]
+    sku_capacities: List[int]
+    pallets: List[Pallet]
+    orders: List[Order]
