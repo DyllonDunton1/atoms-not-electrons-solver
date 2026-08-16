@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import FrozenSet
 
 from .models import Position
 from .world import WorldState
 
 
-Footprint = frozenset[Position]
+Footprint = FrozenSet[Position]
 SINGLE_ROBOT_FOOTPRINT: Footprint = frozenset({(0, 0)})
 
 
