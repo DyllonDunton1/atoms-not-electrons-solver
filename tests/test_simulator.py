@@ -180,12 +180,19 @@ class TestSimulatorStep(unittest.TestCase):
         with self.assertRaisesRegex(SimulationError, "Unknown robot id 9"):
             simulator.step([Action(0, 9, ActionType.MOVE, (6, 5))])
 
-    def test_rejects_docking_actions_for_now(self):
-        world = make_world([Robot(0, (5, 5))])
+    def test_dock_action_attaches_adjacent_pallet(self):
+        world = make_world(
+            [Robot(0, (5, 5))],
+            [make_pallet(0, (6, 5))],
+        )
         simulator = Simulator(world)
 
-        with self.assertRaisesRegex(SimulationError, "not supported yet"):
-            simulator.step([Action(0, 0, ActionType.DOCK, (6, 5))])
+        simulator.step([Action(0, 0, ActionType.DOCK, (6, 5))])
+
+        self.assertEqual(world.robots[0].docked_pallets, [0])
+        self.assertEqual(world.pallets[0].docked_to, 0)
+        self.assertEqual(world.pallets[0].docked_offset, (1, 0))
+        self.assertEqual(world.timestep, 1)
 
     def test_failed_step_does_not_partially_move_robots(self):
         world = make_world(
