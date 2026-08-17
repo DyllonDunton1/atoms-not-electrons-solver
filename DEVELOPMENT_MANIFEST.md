@@ -51,6 +51,7 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Reservations cover the full docked footprint, including every moving footprint edge.
   - Deterministic priority is robot-ID order. Before a moving robot has been planned for the current timestep, its current footprint is treated as known occupancy only at `t`, not speculative occupancy at `t+1`.
   - Once a higher-priority robot's trajectory is chosen, its normal full trajectory reservations are authoritative; lower-priority robots planned afterward must yield or spatially detour immediately around those committed reservations.
+  - Before committing a priority trajectory, the solver checks every still-unplanned lower-priority moving robot for at least one legal immediate transition. If the proposed trajectory would remove both waiting and every legal first move, the solver preserves that robot's best currently legal escape transition, replans the higher-priority trajectory around it, and then forces the yielding robot to execute that first move. This prevents a rigid docked footprint from being trapped by an otherwise valid higher-priority claim without adding a stall timer or deliberate recovery delay.
 
 - **Five-robot baseline**
   - `src/multi_robot_solver.py` remains the preserved correctness baseline.
@@ -137,8 +138,13 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Cause: while planning a robot, every other active robot's current cell was provisionally reserved at both `t` and `t+1`. That speculative `t+1` occupancy let timed A* repeatedly prefer waiting for the blocking robot to disappear rather than committing the higher-priority trajectory and forcing the lower-priority robot to move aside.
   - Fix: provisional occupancy for unplanned active robots is now reserved only at the known current state `t`. Actual chosen trajectories keep the existing conservative full reservations. Because robots are planned in ID order, the lower-ID trajectory can claim future space and the higher-ID robot planned afterward must yield or detour on the first available timestep.
 
+- **Docked rigid footprint could lose its only yield move**
+  - Observed in the next 5r/1000 run capped at 20,000 timesteps: at `t=7461`, robot 0 was at `(16,11)` while robot 1 docked the east-side pallet at `(17,10)` from center `(16,10)`. Robot 1's only legal immediate escape was left to `(15,10)`, which sweeps the docked pallet into robot 1's old center `(16,10)`. The higher-priority robot 0 trajectory could reserve that cell at the same future state, eliminating robot 1's only legal transition; both stopped and the remaining fleet eventually queued behind them.
+  - Cause: treating an unplanned robot's future center as free was correct for ordinary single-cell yielding, but a rigid docked footprint may need one of its current cells as a swept footprint cell during the yield transition.
+  - Fix: before a higher-priority trajectory is committed, test whether every lower-priority moving robot can still either wait or make at least one legal one-step move with its full current footprint. If not, select its best legal immediate escape from the pre-commit state, reserve that transition while replanning the higher-priority trajectory, and force the lower-priority robot to execute the escape when its turn is planned. The response is immediate; there is no wait threshold or deadlock-recovery timer.
+
 - **Regression coverage updated with each fix**
-  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, final-aisle live-availability rescanning, and immediate priority-based yielding between adjacent active robots.
+  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, final-aisle live-availability rescanning, immediate priority-based yielding between adjacent active robots, and rigid docked-footprint escape preservation.
   - Updated an older docking test whose expectation intentionally conflicted with the permanent-home-cell invariant.
 
 ## Current optimization boundary
