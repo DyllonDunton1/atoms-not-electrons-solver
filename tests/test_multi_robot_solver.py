@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 import unittest
 
-from src.models import ActionType, Order, ProblemInstance, Robot
+from src.models import ActionType, Order, Pallet, ProblemInstance, Robot
 from src.multi_robot_solver import Intent, MultiRobotSolver
 from src.parser import parse_problem
 from src.simulator import Simulator
@@ -144,6 +144,53 @@ class TestMultiRobotSolver(unittest.TestCase):
 
         self.assertEqual(world.robots[0].position, (5, 4))
         self.assertEqual(world.robots[1].position, (5, 7))
+
+    def test_docked_lower_priority_robot_keeps_immediate_escape(self):
+        # Mirrors the t=7461 long-run failure: robot 1 carries a pallet on its
+        # east side in a service lane. Up/down keep that pallet in occupied
+        # pallet cells and moving right puts the robot center on a pallet home,
+        # so moving left is its only legal immediate yield move.
+        pallets = [
+            Pallet(0, (17, 10), 0, 1, 1, (17, 10), 1, (1, 0)),
+            Pallet(1, (17, 9), 1, 1, 1, (17, 9)),
+            Pallet(2, (17, 11), 2, 1, 1, (17, 11)),
+            Pallet(3, (18, 10), 3, 1, 1, (18, 10)),
+        ]
+        problem = ProblemInstance(
+            robots=[
+                Robot(0, (16, 11)),
+                Robot(1, (16, 10), docked_pallets=[0]),
+            ],
+            sku_capacities=[1, 1, 1, 1],
+            pallets=pallets,
+            orders=[],
+        )
+        world = WorldState(problem)
+        solver = MultiRobotSolver(
+            world,
+            robot_ids=[0, 1],
+            order_ids=[],
+            max_timesteps=20,
+        )
+        intents = {
+            0: Intent(move_goal=(16, 9)),
+            1: Intent(move_goal=(16, 39)),
+        }
+
+        first_actions, chosen = solver._plan_moves(intents)
+        first_by_robot = {action.robot_id: action for action in first_actions}
+
+        self.assertIn(1, first_by_robot)
+        self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
+        self.assertEqual(first_by_robot[1].target, (15, 10))
+
+        # The rigid footprint move itself must be simulator-legal: robot 1
+        # shifts left and its docked pallet occupies robot 1's old center cell.
+        solver.simulator.step(first_actions)
+        solver._advance_movement_cache(chosen)
+        self.assertEqual(world.robots[1].position, (15, 10))
+        self.assertEqual(world.pallets[0].position, (16, 10))
+        world.validate()
 
     def test_two_robots_solve_first_ten_orders(self):
         world, actions = self._run_prefix([0, 1], 10)
