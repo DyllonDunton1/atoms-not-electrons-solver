@@ -19,6 +19,7 @@ COLLECT = "collect"
 TO_REFILL = "to_refill"
 RETURN_REFILL = "return_refill"
 FULFILL = "fulfill"
+PATH_SLACK = 20
 
 
 @dataclass
@@ -330,20 +331,6 @@ class MultiRobotSolver:
 
         raise RuntimeError("Robot state machine did not settle")
 
-    def _trajectory_free(
-        self,
-        trajectory: List[TimedPosition],
-        footprint: Footprint,
-        reservations: ReservationTable,
-    ) -> bool:
-        return all(
-            current[0] == previous[0] + 1
-            and reservations.transition_is_free(
-                previous[0], previous[1], current[1], footprint
-            )
-            for previous, current in zip(trajectory, trajectory[1:])
-        )
-
     def _cached_plan_usable(
         self,
         robot_id: int,
@@ -366,7 +353,11 @@ class MultiRobotSolver:
         if len(plan.trajectory) < 2:
             return robot.position == goal
 
-        next_cells = ReservationTable.footprint_cells(plan.trajectory[1][1], footprint)
+        next_timestep, next_position = plan.trajectory[1]
+        if next_timestep != self.world.timestep + 1:
+            return False
+
+        next_cells = ReservationTable.footprint_cells(next_position, footprint)
         if next_cells & blocked:
             return False
 
@@ -378,7 +369,12 @@ class MultiRobotSolver:
         if next_cells & pallet_cells:
             return False
 
-        return self._trajectory_free(plan.trajectory, footprint, scheduler.reservations)
+        return scheduler.reservations.transition_is_free(
+            self.world.timestep,
+            robot.position,
+            next_position,
+            footprint,
+        )
 
     def _plan_moves(
         self,
@@ -430,13 +426,16 @@ class MultiRobotSolver:
                     for pallet in self.world.pallets.values()
                     if pallet.docked_to is not None
                 ]
+                distance = abs(goal[0] - robot.position[0]) + abs(
+                    goal[1] - robot.position[1]
+                )
                 trajectory = scheduler.plan_timed_path(
                     robot.position,
                     goal,
                     start_timestep=timestep,
                     footprint=footprint,
                     ignored_pallet_ids=docked_pallet_ids,
-                    max_timestep=timestep + 3000,
+                    max_timestep=timestep + distance + PATH_SLACK,
                 )
 
                 for reserved_timestep, position in temporary_cells:
