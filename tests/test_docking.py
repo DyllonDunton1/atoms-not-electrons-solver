@@ -3,7 +3,7 @@
 import unittest
 
 from src.models import Action, ActionType, Pallet, ProblemInstance, Robot
-from src.pathfinding import PathPlanner, SINGLE_ROBOT_FOOTPRINT
+from src.pathfinding import PathPlanner
 from src.simulator import SimulationError, Simulator
 from src.world import WorldState
 
@@ -180,7 +180,7 @@ class TestDockedPathfinding(unittest.TestCase):
             frozenset({(0, 0), (-1, 0), (0, -1)}),
         )
 
-    def test_path_valid_for_single_robot_can_be_invalid_with_docked_pallet(self):
+    def test_ignored_docked_pallet_home_still_blocks_robot_center(self):
         world = make_world(
             [Robot(0, (1, 2))],
             [make_pallet(0, (2, 2))],
@@ -191,21 +191,13 @@ class TestDockedPathfinding(unittest.TestCase):
         simulator.step([Action(0, 0, ActionType.DOCK, (2, 2))])
         planner = PathPlanner(world)
 
-        single_path = planner.find_path(
+        path = planner.find_path(
             (1, 2),
             (2, 2),
-            footprint=SINGLE_ROBOT_FOOTPRINT,
-            ignored_pallet_ids=[0],
-        )
-        docked_path = planner.find_path(
-            (1, 2),
-            (2, 2),
-            footprint=planner.footprint_for_robot(0),
             ignored_pallet_ids=world.robots[0].docked_pallets,
         )
 
-        self.assertEqual(single_path, [(1, 2), (2, 2)])
-        self.assertEqual(docked_path, [])
+        self.assertEqual(path, [])
 
     def test_pallet_part_of_planner_footprint_respects_obstacles(self):
         world = make_world(
