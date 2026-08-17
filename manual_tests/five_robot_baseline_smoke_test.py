@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.metrics import analyze_actions, format_metrics_report, write_metrics_json
 from src.models import ActionType
 from src.multi_robot_solver import MultiRobotSolver
 from src.parser import parse_problem
@@ -155,6 +156,15 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_submission(actions, output_path)
 
+    metrics_report = analyze_actions(
+        actions,
+        parse_problem(BIG_ORDER_PATH),
+        robot_ids=robot_ids,
+        end_timestep=replay_world.timestep,
+    )
+    metrics_path = output_path.with_name(output_path.stem + "_metrics.json")
+    write_metrics_json(metrics_report, metrics_path)
+
     fulfilled_count = sum(world.orders[i].fulfilled for i in order_ids)
     assignment_counts = Counter(
         world.orders[i].assigned_robot
@@ -176,7 +186,9 @@ def main() -> None:
         )
     )
     print("Fresh replay: valid")
+    print(format_metrics_report(metrics_report))
     print(f"Wrote {output_path}")
+    print(f"Wrote {metrics_path}")
 
 
 if __name__ == "__main__":
