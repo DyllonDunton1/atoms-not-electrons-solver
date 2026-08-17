@@ -4,7 +4,8 @@ from pathlib import Path
 import threading
 import unittest
 
-from src.multi_robot_solver import MultiRobotSolver
+from src.models import ActionType, Order, ProblemInstance, Robot
+from src.multi_robot_solver import Intent, MultiRobotSolver
 from src.parser import parse_problem
 from src.simulator import Simulator
 from src.world import WorldState
@@ -89,6 +90,60 @@ class TestMultiRobotSolver(unittest.TestCase):
         replay_world.validate()
 
         return world, actions
+
+    def test_lower_priority_robot_yields_immediately(self):
+        problem = ProblemInstance(
+            robots=[Robot(0, (5, 6)), Robot(1, (5, 5))],
+            sku_capacities=[],
+            pallets=[],
+            orders=[Order(0, []), Order(1, [])],
+        )
+        world = WorldState(problem)
+        solver = MultiRobotSolver(
+            world,
+            robot_ids=[0, 1],
+            order_ids=[0, 1],
+            max_timesteps=20,
+        )
+        intents = {
+            0: Intent(move_goal=(5, 4)),
+            1: Intent(move_goal=(5, 7)),
+        }
+
+        first_actions, chosen = solver._plan_moves(intents)
+        first_by_robot = {action.robot_id: action for action in first_actions}
+
+        # Robot 0 has priority and must wait one timestep because robot 1
+        # occupies the next cell at action start. Robot 1 must yield immediately
+        # rather than also waiting and creating a repeated optimistic deadlock.
+        self.assertNotIn(0, first_by_robot)
+        self.assertIn(1, first_by_robot)
+        self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
+        self.assertNotEqual(first_by_robot[1].target, (5, 6))
+
+        solver.simulator.step(first_actions)
+        solver._advance_movement_cache(chosen)
+
+        second_actions, chosen = solver._plan_moves(intents)
+        second_by_robot = {action.robot_id: action for action in second_actions}
+        self.assertIn(0, second_by_robot)
+        self.assertEqual(second_by_robot[0].target, (5, 5))
+
+        solver.simulator.step(second_actions)
+        solver._advance_movement_cache(chosen)
+
+        for _ in range(8):
+            if (
+                world.robots[0].position == (5, 4)
+                and world.robots[1].position == (5, 7)
+            ):
+                break
+            actions, chosen = solver._plan_moves(intents)
+            solver.simulator.step(actions)
+            solver._advance_movement_cache(chosen)
+
+        self.assertEqual(world.robots[0].position, (5, 4))
+        self.assertEqual(world.robots[1].position, (5, 7))
 
     def test_two_robots_solve_first_ten_orders(self):
         world, actions = self._run_prefix([0, 1], 10)
