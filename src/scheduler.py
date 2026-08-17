@@ -196,7 +196,7 @@ class Scheduler:
         self,
         blocked: Iterable[Position],
         ignored_pallet_ids: Iterable[int],
-    ) -> Set[Position]:
+    ) -> Tuple[Set[Position], Set[Position]]:
         ignored_ids = set(ignored_pallet_ids)
         unknown_ids = ignored_ids - set(self.world.pallets)
         if unknown_ids:
@@ -204,20 +204,32 @@ class Scheduler:
                 f"Unknown ignored pallet ids: {sorted(unknown_ids)}"
             )
 
+        pallet_home_positions = {
+            pallet.original_position
+            for pallet in self.world.pallets.values()
+        }
         blocked_positions = {
-            pallet.position
+            pallet.original_position
             for pallet_id, pallet in self.world.pallets.items()
             if pallet_id not in ignored_ids
         }
+        blocked_positions.update(
+            pallet.position
+            for pallet_id, pallet in self.world.pallets.items()
+            if pallet_id not in ignored_ids
+        )
         blocked_positions.update(blocked)
-        return blocked_positions
+        return blocked_positions, pallet_home_positions
 
     def _footprint_is_clear(
         self,
         center: Position,
         footprint: Footprint,
         blocked: Set[Position],
+        center_blocked: Set[Position],
     ) -> bool:
+        if center in center_blocked:
+            return False
         for position in self.reservations.footprint_cells(center, footprint):
             if not self.world.in_bounds(position) or position in blocked:
                 return False
@@ -237,24 +249,34 @@ class Scheduler:
         """Return a shortest reservation-aware trajectory through space-time.
 
         States are ``(timestep, robot_center)`` pairs. Successors are the four
-        orthogonal moves plus waiting in place. Static pallet geometry and the
-        full moving footprint are checked alongside existing cell/edge
-        reservations. An empty list means no path was found within the search
-        horizon.
+        orthogonal moves plus waiting in place. Pallet home cells stay reserved
+        even while their pallets are being carried elsewhere; moved pallet
+        cells, the full moving footprint, and time reservations are checked as
+        well. An empty list means no path was found within the search horizon.
         """
         if start_timestep < 0:
             raise ValueError("start_timestep must be nonnegative")
         if not footprint or (0, 0) not in footprint:
             raise ValueError("Footprint must include the robot center at (0, 0)")
 
-        blocked_positions = self._static_blocked_positions(
+        blocked_positions, pallet_home_positions = self._static_blocked_positions(
             blocked,
             ignored_pallet_ids,
         )
 
-        if not self._footprint_is_clear(start, footprint, blocked_positions):
+        if not self._footprint_is_clear(
+            start,
+            footprint,
+            blocked_positions,
+            pallet_home_positions,
+        ):
             return []
-        if not self._footprint_is_clear(goal, footprint, blocked_positions):
+        if not self._footprint_is_clear(
+            goal,
+            footprint,
+            blocked_positions,
+            pallet_home_positions,
+        ):
             return []
         if not self.reservations.footprint_is_free(
             start_timestep,
@@ -323,6 +345,7 @@ class Scheduler:
                     next_position,
                     footprint,
                     blocked_positions,
+                    pallet_home_positions,
                 ):
                     continue
 
