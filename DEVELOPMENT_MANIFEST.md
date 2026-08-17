@@ -87,7 +87,10 @@ Concise design notes, failure history, and optimization experiments for the solv
   - A robot keeps one `active_aisle_id` and executes the planned pickup stops in order.
   - Pallets are claimed only for the current stop, not for the entire future aisle route.
   - If a future stop becomes stale because another robot temporarily uses that pallet, replan the remaining work from the robot's current position.
-  - After the aisle is complete, release the aisle commitment and score the remaining aisles again.
+  - Before releasing an aisle after its final planned stop, rescan that same aisle against the robot's still-unfulfilled requirements and the current live pallet availability.
+  - If a pallet that was previously busy has become available during the visit, extend the current aisle plan in place and service it before leaving.
+  - The rescan does not predict release times, create future pallet reservations, or establish a dibs queue. If the pallet is still unavailable at the final rescan, release the aisle normally and let later warehouse-level scoring rediscover it if needed.
+  - After the aisle is actually complete, release the aisle commitment and score the remaining aisles again.
 
 - **Replenishment separation**
   - Refill distance is deliberately excluded from aisle scoring so this experiment isolates collection-ordering improvements.
@@ -122,8 +125,13 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Risk identified during aisle-planner design: if the robot docks a pallet below itself, robot `y=39` implies pallet `y=40`.
   - Fix: when an aisle stop will require replenishment, pickup planning excludes the above-pallet robot position that would create a south/bottom docked pallet.
 
+- **Temporary pallet contention caused an avoidable aisle re-entry**
+  - Observed in the first 5r/10 aisle-aware benchmark: robot 1 initially serviced aisle 5 while robot 3 was using the remaining needed SKU-1 pallet at `(45, 16)`. Robot 3 released it at `t=56`, but robot 1's original aisle plan did not include that pallet; robot 1 finished the rest of aisle 5 at `t=64` and did not rediscover the now-free pallet until returning at `t=135`.
+  - Cause: the aisle plan correctly excluded unavailable pallets when it was built, but finishing the stored plan was treated as finishing the aisle even though live pallet availability could have changed during the visit.
+  - Fix: after the last stored stop, rescan the current aisle using current claims and remaining requirements. If useful work is now available, extend the aisle plan without dropping the aisle commitment. No future release prediction or pallet queue is introduced.
+
 - **Regression coverage updated with each fix**
-  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, and refill-resume behavior.
+  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, and final-aisle live-availability rescanning.
   - Updated an older docking test whose expectation intentionally conflicted with the permanent-home-cell invariant.
 
 ## Current optimization boundary
