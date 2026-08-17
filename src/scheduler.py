@@ -60,7 +60,13 @@ class ReservationTable:
         end: Position,
         footprint: Footprint,
     ) -> None:
-        """Reserve one wait/move transition for an entire rigid footprint."""
+        """Reserve one wait/move transition for an entire rigid footprint.
+
+        The destination footprint is reserved at both the action-start state and
+        the resulting state. This mirrors the simulator's conservative movement
+        rule: another robot may not occupy a cell at the start of a timestep if
+        this transition intends to enter that cell during the timestep.
+        """
         distance = abs(end[0] - start[0]) + abs(end[1] - start[1])
         if distance not in (0, 1):
             raise ValueError(
@@ -68,6 +74,7 @@ class ReservationTable:
             )
 
         self.reserve_footprint(timestep, start, footprint)
+        self.reserve_footprint(timestep, end, footprint)
         self.reserve_footprint(timestep + 1, end, footprint)
 
         delta = (end[0] - start[0], end[1] - start[1])
