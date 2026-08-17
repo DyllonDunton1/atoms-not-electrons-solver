@@ -20,9 +20,10 @@ from src.writer import write_submission
 
 
 BIG_ORDER_PATH = REPO_ROOT / "source_material" / "BIG_ORDER.txt"
+MAX_TIMESTEPS_ERROR = "Multi-robot solver exceeded max_timesteps"
 
 
-def solve_with_progress(solver: MultiRobotSolver, label: str):
+def solve_with_progress(solver: MultiRobotSolver, label: str, stop_timestep=None):
     result = {}
     error = {}
 
@@ -58,58 +59,113 @@ def solve_with_progress(solver: MultiRobotSolver, label: str):
         )
 
     if "exception" in error:
-        raise error["exception"]
+        exception = error["exception"]
+        stopped_as_requested = (
+            stop_timestep is not None
+            and isinstance(exception, RuntimeError)
+            and str(exception) == MAX_TIMESTEPS_ERROR
+            and solver.world.timestep >= stop_timestep
+        )
+        if not stopped_as_requested:
+            raise exception
+
+        print(f"Reached requested stop timestep t={solver.world.timestep}.", flush=True)
+        return list(solver.actions)
+
     return result["actions"]
+
+
+def print_snapshot(solver: MultiRobotSolver) -> None:
+    print(f"Snapshot at t={solver.world.timestep}:")
+    for robot_id in solver.active_robot_ids:
+        robot = solver.world.robots[robot_id]
+        state = solver.states[robot_id]
+        order_id = state.task.order_id if state.task is not None else None
+        movement_goal = state.movement.goal if state.movement is not None else None
+        print(
+            f"  robot {robot_id}: pos={robot.position} order={order_id} "
+            f"phase={state.phase} pallet={state.pallet_id} pickup={state.pickup} "
+            f"row_goal={state.row_goal} move_goal={movement_goal}"
+        )
 
 
 def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("--robots", type=int, default=5, choices=range(1, 6))
     parser.add_argument("--orders", type=int, default=10, choices=range(1, 1001))
+    parser.add_argument(
+        "--stop-timestep",
+        type=int,
+        default=None,
+        help="Stop generation at this world timestep and write the partial schedule.",
+    )
     args = parser.parse_args()
+
+    if args.stop_timestep is not None and args.stop_timestep <= 0:
+        parser.error("--stop-timestep must be positive")
 
     robot_ids = list(range(args.robots))
     order_ids = list(range(args.orders))
 
     world = WorldState(parse_problem(BIG_ORDER_PATH))
+    solver_kwargs = {}
+    if args.stop_timestep is not None:
+        solver_kwargs["max_timesteps"] = args.stop_timestep
+
     solver = MultiRobotSolver(
         world,
         robot_ids=robot_ids,
         order_ids=order_ids,
+        **solver_kwargs,
     )
     label = f"{args.robots} robots / {args.orders} orders"
-    actions = solve_with_progress(solver, label)
+    if args.stop_timestep is not None:
+        label += f" / stop t={args.stop_timestep}"
+
+    actions = solve_with_progress(solver, label, args.stop_timestep)
+
+    if args.stop_timestep is not None:
+        print_snapshot(solver)
 
     print("Generation complete. Replaying from fresh input...", flush=True)
 
-    # Independent replay from untouched input catches schedule-generation bugs.
     replay_world = WorldState(parse_problem(BIG_ORDER_PATH))
-    Simulator(replay_world).run(actions)
+    replay_simulator = Simulator(replay_world)
+    replay_simulator.run(actions)
+
+    if args.stop_timestep is not None:
+        while replay_world.timestep < args.stop_timestep:
+            replay_simulator.step([])
+
     replay_world.validate()
 
-    if not all(replay_world.orders[i].fulfilled for i in order_ids):
+    if args.stop_timestep is None and not all(
+        replay_world.orders[i].fulfilled for i in order_ids
+    ):
         raise RuntimeError("Fresh replay did not fulfill every requested order")
 
     action_keys = [(action.timestep, action.robot_id) for action in actions]
     if len(action_keys) != len(set(action_keys)):
         raise RuntimeError("Generated duplicate (timestep, robot) actions")
 
+    suffix = f"_{args.stop_timestep}t" if args.stop_timestep is not None else ""
     output_path = REPO_ROOT / "outputs" / (
-        f"fifo_baseline_{args.robots}r_{args.orders}o.txt"
+        f"fifo_baseline_{args.robots}r_{args.orders}o{suffix}.txt"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_submission(actions, output_path)
 
+    fulfilled_count = sum(world.orders[i].fulfilled for i in order_ids)
     assignment_counts = Counter(
         world.orders[i].assigned_robot
         for i in order_ids
+        if world.orders[i].assigned_robot is not None
     )
     action_counts = Counter(action.action for action in actions)
-    final_timestep = max((action.timestep for action in actions), default=-1) + 1
 
     print(f"Robots: {robot_ids}")
-    print(f"Orders fulfilled: {args.orders}")
-    print(f"Elapsed timesteps: {final_timestep}")
+    print(f"Orders fulfilled: {fulfilled_count}/{args.orders}")
+    print(f"World timestep reached: {solver.world.timestep}")
     print(f"Actions written: {len(actions)}")
     print(f"Assignments by robot: {dict(sorted(assignment_counts.items()))}")
     print(
