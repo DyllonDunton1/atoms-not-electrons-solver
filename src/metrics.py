@@ -7,8 +7,9 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Union
 
+from .aisles import build_aisle_layout
 from .models import Action, ActionType, Position, ProblemInstance
 from .parser import parse_problem
 
@@ -79,40 +80,10 @@ def read_submission(path: Union[str, Path]) -> List[Action]:
     return actions
 
 
-def _pallet_aisles(problem: ProblemInstance) -> Tuple[Dict[Position, int], int]:
-    """Group orthogonally connected pallet-home rectangles into aisle ids."""
-    homes = {pallet.original_position for pallet in problem.pallets}
-    remaining = set(homes)
-    components: List[Set[Position]] = []
-
-    while remaining:
-        start = min(remaining)
-        stack = [start]
-        component = set()
-        remaining.remove(start)
-
-        while stack:
-            position = stack.pop()
-            component.add(position)
-            x, y = position
-            for neighbor in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                if neighbor in remaining:
-                    remaining.remove(neighbor)
-                    stack.append(neighbor)
-        components.append(component)
-
-    components.sort(
-        key=lambda component: (
-            min(y for _, y in component),
-            min(x for x, _ in component),
-        )
-    )
-    mapping = {
-        position: aisle_id
-        for aisle_id, component in enumerate(components)
-        for position in component
-    }
-    return mapping, len(components)
+def _pallet_aisles(problem: ProblemInstance):
+    """Return the shared deterministic pallet-home-to-aisle mapping."""
+    layout = build_aisle_layout(problem.pallets)
+    return dict(layout.home_to_aisle), len(layout.aisles)
 
 
 def _segment_robot_actions(actions: Sequence[Action]) -> List[List[Action]]:
