@@ -154,6 +154,23 @@ class TestAislePlanner(unittest.TestCase):
         self.assertEqual(len(plan.stops), 1)
         self.assertEqual(plan.stops[0].pallet_id, 1)
 
+    def test_refill_stop_never_docks_pallet_below_robot(self):
+        world = make_world(
+            [make_pallet(0, (10, 10), 0, count=0)],
+            robot_position=(10, 8),
+        )
+        planner = AislePlanner(world)
+        aisle_id = planner.aisle_for_pallet(0)
+
+        plan = planner.plan_aisle(
+            aisle_id,
+            (10, 8),
+            {0: 3},
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertNotEqual(plan.stops[0].pickup, (10, 9))
+
 
 if __name__ == "__main__":
     unittest.main()
