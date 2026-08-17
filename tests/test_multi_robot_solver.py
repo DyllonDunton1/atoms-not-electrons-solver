@@ -163,13 +163,13 @@ class TestMultiRobotSolver(unittest.TestCase):
             ],
             sku_capacities=[1, 1, 1, 1],
             pallets=pallets,
-            orders=[],
+            orders=[Order(0, []), Order(1, [])],
         )
         world = WorldState(problem)
         solver = MultiRobotSolver(
             world,
             robot_ids=[0, 1],
-            order_ids=[],
+            order_ids=[0, 1],
             max_timesteps=20,
         )
         intents = {
