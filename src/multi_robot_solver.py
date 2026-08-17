@@ -113,12 +113,35 @@ class MultiRobotSolver:
         robot = self.world.robots[robot_id]
         return ReservationTable.footprint_cells(robot.position, self._footprint(robot_id))
 
+    def _robot_is_permanently_idle(self, robot_id: int) -> bool:
+        """Return whether a robot has no remaining chance to receive work."""
+        if robot_id not in self.active_robot_ids:
+            return True
+        return self.states[robot_id].task is None and len(self.queue) == 0
+
+    def _permanent_robot_cells(self, robot_id: int) -> Set[Position]:
+        """Return cells occupied forever by other finished/inactive robots."""
+        blocked: Set[Position] = set()
+        for other_id in self.world.robots:
+            if other_id != robot_id and self._robot_is_permanently_idle(other_id):
+                blocked.update(self._footprint_cells(other_id))
+        return blocked
+
     def _other_robot_cells(self, robot_id: int) -> Set[Position]:
         blocked: Set[Position] = set()
         for other_id in self.world.robots:
             if other_id != robot_id:
                 blocked.update(self._footprint_cells(other_id))
         return blocked
+
+    def _goal_blocked_by_permanent_robot(
+        self,
+        robot_id: int,
+        goal: Position,
+        footprint: Footprint,
+    ) -> bool:
+        goal_cells = ReservationTable.footprint_cells(goal, footprint)
+        return bool(goal_cells & self._permanent_robot_cells(robot_id))
 
     def _assign_free_robots(self) -> None:
         for robot_id in self.active_robot_ids:
@@ -152,6 +175,7 @@ class MultiRobotSolver:
 
     def _best_row_goal(
         self,
+        robot_id: int,
         start: Position,
         row: int,
         *,
@@ -160,11 +184,14 @@ class MultiRobotSolver:
     ) -> Optional[Position]:
         best = None
         best_length = None
+        permanent_blocked = self._permanent_robot_cells(robot_id)
+
         for x in range(self.world.width):
             path = self.spatial.find_path(
                 start,
                 (x, row),
                 footprint=footprint,
+                blocked=permanent_blocked,
                 ignored_pallet_ids=ignored_pallet_ids,
             )
             if not path:
@@ -183,6 +210,7 @@ class MultiRobotSolver:
         sku: int,
     ) -> List[Tuple[int, int, Position]]:
         robot = self.world.robots[robot_id]
+        permanent_blocked = self._permanent_robot_cells(robot_id)
         candidates = []
         for pallet in sorted(self.world.pallets_for_sku(sku), key=lambda p: p.pallet_id):
             claim = self.pallet_claims.get(pallet.pallet_id)
@@ -192,18 +220,23 @@ class MultiRobotSolver:
                 continue
 
             for pickup in self.world.adjacent_positions(pallet.position):
-                path = self.spatial.find_path(robot.position, pickup)
+                path = self.spatial.find_path(
+                    robot.position,
+                    pickup,
+                    blocked=permanent_blocked,
+                )
                 if path:
                     candidates.append((len(path) - 1, pallet.pallet_id, pickup))
 
         candidates.sort(key=lambda item: (item[0], item[1], item[2][1], item[2][0]))
         return candidates
 
-    def _can_refill(self, pallet_id: int, pickup: Position) -> bool:
+    def _can_refill(self, robot_id: int, pallet_id: int, pickup: Position) -> bool:
         pallet = self.world.pallets[pallet_id]
         offset = (pallet.position[0] - pickup[0], pallet.position[1] - pickup[1])
         footprint = frozenset({(0, 0), offset})
         return self._best_row_goal(
+            robot_id,
             pickup,
             self.world.replenishment_y,
             footprint=footprint,
@@ -222,7 +255,7 @@ class MultiRobotSolver:
                 break
         if choice is None:
             for _, pallet_id, pickup in candidates:
-                if self._can_refill(pallet_id, pickup):
+                if self._can_refill(robot_id, pallet_id, pickup):
                     choice = (pallet_id, pickup)
                     break
         if choice is None:
@@ -293,11 +326,22 @@ class MultiRobotSolver:
                     state.row_goal = None
                     state.movement = None
                     continue
+
+                footprint = self._footprint(robot_id)
+                if state.row_goal is not None and self._goal_blocked_by_permanent_robot(
+                    robot_id,
+                    state.row_goal,
+                    footprint,
+                ):
+                    state.row_goal = None
+                    state.movement = None
+
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
+                        robot_id,
                         robot.position,
                         self.world.replenishment_y,
-                        footprint=self._footprint(robot_id),
+                        footprint=footprint,
                         ignored_pallet_ids=robot.docked_pallets,
                     )
                 if state.row_goal is None:
@@ -318,8 +362,18 @@ class MultiRobotSolver:
                     if Counter(robot.storage) != Counter(order.skus):
                         raise RuntimeError("Robot storage does not match its queued order")
                     return Intent(ActionType.FULFILL, (0, 0))
+
+                if state.row_goal is not None and self._goal_blocked_by_permanent_robot(
+                    robot_id,
+                    state.row_goal,
+                    SINGLE_ROBOT_FOOTPRINT,
+                ):
+                    state.row_goal = None
+                    state.movement = None
+
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
+                        robot_id,
                         robot.position,
                         self.world.fulfillment_y,
                     )
@@ -403,15 +457,17 @@ class MultiRobotSolver:
             robot = self.world.robots[robot_id]
             footprint = self._footprint(robot_id)
             blocked = self._other_robot_cells(robot_id)
+            permanent_blocked = self._permanent_robot_cells(robot_id)
+            temporary_blocked = blocked - permanent_blocked
 
             if self._cached_plan_usable(robot_id, goal, scheduler, blocked):
                 trajectory = list(state.movement.trajectory)
             else:
-                # Current robot footprints are temporary occupancy, not static
+                # Active robot footprints are temporary occupancy, not static
                 # walls. Blocking them only at t/t+1 lets lower-priority robots
                 # wait or spatially detour around higher-priority trajectories.
                 temporary_cells = []
-                for position in blocked:
+                for position in temporary_blocked:
                     for reserved_timestep in (timestep, timestep + 1):
                         if scheduler.reservations.cell_is_free(
                             reserved_timestep, position
@@ -434,6 +490,7 @@ class MultiRobotSolver:
                     goal,
                     start_timestep=timestep,
                     footprint=footprint,
+                    blocked=permanent_blocked,
                     ignored_pallet_ids=docked_pallet_ids,
                     max_timestep=timestep + distance + PATH_SLACK,
                 )
