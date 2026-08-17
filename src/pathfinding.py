@@ -56,8 +56,12 @@ class PathPlanner:
         center: Position,
         footprint: Footprint,
         blocked: Set[Position],
+        center_blocked: Set[Position],
     ) -> bool:
         """Return whether every cell in a footprint is in bounds and unblocked."""
+        if center in center_blocked:
+            return False
+
         center_x, center_y = center
         for offset_x, offset_y in footprint:
             occupied = (center_x + offset_x, center_y + offset_y)
@@ -77,12 +81,15 @@ class PathPlanner:
         """Return a shortest path from ``start`` to ``goal`` using A*.
 
         The returned path contains both the start and goal robot-center
-        positions. Pallet cells and explicitly blocked cells are treated as
-        static obstacles. ``ignored_pallet_ids`` is for pallets that are part
-        of the moving footprint itself, such as pallets currently docked to the
-        robot. Other robots are intentionally not static obstacles; time-based
-        robot conflicts belong to the scheduler/reservation layer. An empty
-        list means no valid path exists.
+        positions. Every pallet home cell remains reserved even while that
+        pallet is being carried elsewhere, and a moved pallet's current cell is
+        blocked as well. ``ignored_pallet_ids`` is for pallets that are part of
+        the moving footprint itself, such as pallets currently docked to the
+        robot. Their own home/current cells may be occupied by that moving
+        footprint, but robot centers still may not enter any pallet home cell.
+        Other robots are intentionally not static obstacles; time-based robot
+        conflicts belong to the scheduler/reservation layer. An empty list
+        means no valid path exists.
         """
         if not footprint or (0, 0) not in footprint:
             raise ValueError("Footprint must include the robot center at (0, 0)")
@@ -94,23 +101,40 @@ class PathPlanner:
                 f"Unknown ignored pallet ids: {sorted(unknown_ignored_ids)}"
             )
 
+        pallet_home_positions = {
+            pallet.original_position
+            for pallet in self.world.pallets.values()
+        }
         blocked_positions = {
-            pallet.position
+            pallet.original_position
             for pallet_id, pallet in self.world.pallets.items()
             if pallet_id not in ignored_ids
         }
+        blocked_positions.update(
+            pallet.position
+            for pallet_id, pallet in self.world.pallets.items()
+            if pallet_id not in ignored_ids
+        )
         blocked_positions.update(blocked)
 
-        if not self._footprint_is_clear(start, footprint, blocked_positions):
+        if not self._footprint_is_clear(
+            start,
+            footprint,
+            blocked_positions,
+            pallet_home_positions,
+        ):
             return []
-        if not self._footprint_is_clear(goal, footprint, blocked_positions):
+        if not self._footprint_is_clear(
+            goal,
+            footprint,
+            blocked_positions,
+            pallet_home_positions,
+        ):
             return []
         if start == goal:
             return [start]
 
         # Heap entries are (f_score, g_score, tie_breaker, position).
-        # The monotonically increasing tie breaker keeps heap ordering stable
-        # without affecting shortest-path correctness.
         frontier: List[Tuple[int, int, int, Position]] = []
         tie_breaker = count()
         start_h = self._manhattan(start, goal)
@@ -139,6 +163,7 @@ class PathPlanner:
                     neighbor,
                     footprint,
                     blocked_positions,
+                    pallet_home_positions,
                 ):
                     continue
 
