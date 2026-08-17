@@ -22,12 +22,23 @@ class Simulator:
     def __init__(self, world: WorldState) -> None:
         self.world = world
 
+    def _apply_replenishment(self) -> None:
+        """Refill pallets docked to robots ending the timestep on y=39."""
+        for robot in self.world.robots.values():
+            if robot.position[1] != self.world.replenishment_y:
+                continue
+
+            for pallet_id in robot.docked_pallets:
+                pallet = self.world.pallets[pallet_id]
+                pallet.count = pallet.max_count
+
     def step(self, actions: Iterable[Action]) -> None:
         """Execute one timestep of supported challenge actions.
 
         Robots omitted from ``actions`` wait. The complete timestep is
         validated before any state is changed so an invalid action cannot
-        partially apply the timestep.
+        partially apply the timestep. Automatic replenishment is applied after
+        all robot action effects, matching the challenge's end-of-timestep rule.
         """
         actions_list = list(actions)
 
@@ -324,6 +335,11 @@ class Simulator:
         for robot_id, order_id in fulfillment_orders.items():
             self.world.orders[order_id].fulfilled = True
             self.world.robots[robot_id].storage.clear()
+
+        # Replenishment is automatic and happens after all action effects. A
+        # robot that ends the timestep on y=39 refills every pallet still
+        # docked to it, regardless of the pallets' own y coordinates.
+        self._apply_replenishment()
 
         try:
             self.world.validate()
