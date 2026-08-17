@@ -463,19 +463,16 @@ class MultiRobotSolver:
             if self._cached_plan_usable(robot_id, goal, scheduler, blocked):
                 trajectory = list(state.movement.trajectory)
             else:
-                # Active robot footprints are temporary occupancy, not static
-                # walls. Blocking them only at t/t+1 lets lower-priority robots
-                # wait or spatially detour around higher-priority trajectories.
+                # Active robots that have not been planned yet are known to
+                # occupy their current cells at t, but not at t+1. Reserving
+                # only t lets a higher-priority trajectory claim future space;
+                # when lower-priority robots are planned later, that committed
+                # trajectory forces them to yield and detour immediately.
                 temporary_cells = []
                 for position in temporary_blocked:
-                    for reserved_timestep in (timestep, timestep + 1):
-                        if scheduler.reservations.cell_is_free(
-                            reserved_timestep, position
-                        ):
-                            scheduler.reservations.reserve_cell(
-                                reserved_timestep, position
-                            )
-                            temporary_cells.append((reserved_timestep, position))
+                    if scheduler.reservations.cell_is_free(timestep, position):
+                        scheduler.reservations.reserve_cell(timestep, position)
+                        temporary_cells.append((timestep, position))
 
                 docked_pallet_ids = [
                     pallet.pallet_id
