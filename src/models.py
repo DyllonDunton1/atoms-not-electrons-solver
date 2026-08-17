@@ -40,6 +40,7 @@ class Pallet:
     max_count: int
     original_position: Position
     docked_to: Optional[int] = None
+    docked_offset: Optional[Position] = None
 
 
 @dataclass
