@@ -80,13 +80,13 @@ class TestAislePlanner(unittest.TestCase):
 
         plan = planner.choose_plan(
             (1, 2),
-            {0: 1, 1: 8},
+            {0: 1, 1: 10},
             congestion_by_aisle={},
         )
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.aisle_id, planner.aisle_for_pallet(1))
-        self.assertEqual(plan.useful_quantity, 8)
+        self.assertEqual(plan.useful_quantity, 10)
 
     def test_congestion_is_a_soft_aisle_penalty(self):
         world = make_world(
