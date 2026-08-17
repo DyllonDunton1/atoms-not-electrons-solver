@@ -70,6 +70,7 @@ class WorldState:
         Action validation belongs in the simulator.
         """
         seen_positions = {}
+        cardinal_offsets = {(-1, 0), (1, 0), (0, -1), (0, 1)}
 
         for robot_id, robot in self.robots.items():
             if robot.robot_id != robot_id:
@@ -87,6 +88,54 @@ class WorldState:
                 raise ValueError(
                     f"Robot {robot.robot_id} overlaps {other} at {robot.position}"
                 )
+
+            if len(robot.docked_pallets) > 4:
+                raise ValueError(
+                    f"Robot {robot.robot_id} has more than four docked pallets"
+                )
+
+            if len(set(robot.docked_pallets)) != len(robot.docked_pallets):
+                raise ValueError(
+                    f"Robot {robot.robot_id} lists a docked pallet more than once"
+                )
+
+            used_offsets = set()
+            for pallet_id in robot.docked_pallets:
+                pallet = self.pallets.get(pallet_id)
+                if pallet is None:
+                    raise ValueError(
+                        f"Robot {robot.robot_id} references unknown docked pallet {pallet_id}"
+                    )
+
+                if pallet.docked_to != robot.robot_id:
+                    raise ValueError(
+                        f"Robot {robot.robot_id} lists pallet {pallet_id} as docked, "
+                        f"but pallet owner is {pallet.docked_to}"
+                    )
+
+                if pallet.docked_offset not in cardinal_offsets:
+                    raise ValueError(
+                        f"Pallet {pallet_id} has invalid docked offset "
+                        f"{pallet.docked_offset}"
+                    )
+
+                if pallet.docked_offset in used_offsets:
+                    raise ValueError(
+                        f"Robot {robot.robot_id} has multiple pallets on side "
+                        f"{pallet.docked_offset}"
+                    )
+                used_offsets.add(pallet.docked_offset)
+
+                offset_x, offset_y = pallet.docked_offset
+                expected_position = (
+                    robot.position[0] + offset_x,
+                    robot.position[1] + offset_y,
+                )
+                if pallet.position != expected_position:
+                    raise ValueError(
+                        f"Docked pallet {pallet_id} is at {pallet.position}; expected "
+                        f"{expected_position} beside robot {robot.robot_id}"
+                    )
 
             seen_positions[robot.position] = f"robot {robot.robot_id}"
 
@@ -130,5 +179,29 @@ class WorldState:
                     f"Pallet {pallet.pallet_id} has invalid count {pallet.count}; "
                     f"expected 0 through {pallet.max_count}"
                 )
+
+            if pallet.docked_to is None:
+                if pallet.docked_offset is not None:
+                    raise ValueError(
+                        f"Undocked pallet {pallet.pallet_id} still has docked offset "
+                        f"{pallet.docked_offset}"
+                    )
+            else:
+                owner = self.robots.get(pallet.docked_to)
+                if owner is None:
+                    raise ValueError(
+                        f"Pallet {pallet.pallet_id} is docked to unknown robot "
+                        f"{pallet.docked_to}"
+                    )
+                if pallet.pallet_id not in owner.docked_pallets:
+                    raise ValueError(
+                        f"Pallet {pallet.pallet_id} says it is docked to robot "
+                        f"{pallet.docked_to}, but the robot does not list it"
+                    )
+                if pallet.docked_offset not in cardinal_offsets:
+                    raise ValueError(
+                        f"Pallet {pallet.pallet_id} has invalid docked offset "
+                        f"{pallet.docked_offset}"
+                    )
 
             seen_positions[pallet.position] = f"pallet {pallet.pallet_id}"
