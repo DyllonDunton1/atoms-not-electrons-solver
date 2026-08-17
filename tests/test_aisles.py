@@ -78,15 +78,25 @@ class TestAislePlanner(unittest.TestCase):
         )
         planner = AislePlanner(world)
 
+        near_aisle = planner.aisle_for_pallet(0)
+        far_aisle = planner.aisle_for_pallet(1)
+        requirements = {0: 1, 1: 12}
+
+        near_plan = planner.plan_aisle(near_aisle, (1, 2), requirements)
+        far_plan = planner.plan_aisle(far_aisle, (1, 2), requirements)
         plan = planner.choose_plan(
             (1, 2),
-            {0: 1, 1: 10},
+            requirements,
             congestion_by_aisle={},
         )
 
+        self.assertIsNotNone(near_plan)
+        self.assertIsNotNone(far_plan)
+        self.assertGreater(far_plan.planned_distance, near_plan.planned_distance)
+        self.assertGreater(far_plan.score, near_plan.score)
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.aisle_id, planner.aisle_for_pallet(1))
-        self.assertEqual(plan.useful_quantity, 10)
+        self.assertEqual(plan.aisle_id, far_aisle)
+        self.assertEqual(plan.useful_quantity, 12)
 
     def test_congestion_is_a_soft_aisle_penalty(self):
         world = make_world(
