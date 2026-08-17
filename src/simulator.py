@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 from .models import Action, ActionType, Position
 from .world import WorldState
+
+
+EntityKey = Tuple[str, int]
 
 
 class SimulationError(RuntimeError):
@@ -20,10 +23,9 @@ class Simulator:
         self.world = world
 
     def step(self, actions: Iterable[Action]) -> None:
-        """Execute one timestep of currently supported challenge actions.
+        """Execute one timestep of supported challenge actions.
 
-        Robots omitted from ``actions`` wait. MOVE, PICK, and FULFILL are
-        supported; docking actions are added later. The complete timestep is
+        Robots omitted from ``actions`` wait. The complete timestep is
         validated before any state is changed so an invalid action cannot
         partially apply the timestep.
         """
@@ -35,19 +37,26 @@ class Simulator:
             raise SimulationError(f"Cannot simulate invalid world: {error}") from error
 
         seen_robots: Set[int] = set()
-        proposed_positions: Dict[int, Position] = {}
-        destination_owners: Dict[Position, int] = {}
+        proposed_robot_positions: Dict[int, Position] = {}
+        proposed_pallet_positions: Dict[int, Position] = {}
+        proposed_cell_owners: Dict[Position, int] = {}
         pick_requests: Dict[int, int] = {}
         picks_per_pallet: Dict[int, int] = {}
         fulfillment_orders: Dict[int, int] = {}
         reserved_order_ids: Set[int] = set()
+        dock_requests: Dict[int, int] = {}
+        dock_offsets: Dict[int, Position] = {}
+        reserved_dock_pallets: Set[int] = set()
+        undock_requests: Dict[int, int] = {}
 
         pallet_by_position = {
             pallet.position: pallet for pallet in self.world.pallets.values()
         }
-        robot_positions = {
-            robot.position: robot.robot_id for robot in self.world.robots.values()
-        }
+        entity_by_position: Dict[Position, EntityKey] = {}
+        for robot in self.world.robots.values():
+            entity_by_position[robot.position] = ("robot", robot.robot_id)
+        for pallet in self.world.pallets.values():
+            entity_by_position[pallet.position] = ("pallet", pallet.pallet_id)
 
         for action in actions_list:
             if action.timestep != self.world.timestep:
@@ -74,37 +83,84 @@ class Simulator:
                         f"Robot {action.robot_id} cannot move out of bounds to {target}"
                     )
 
-                distance = (
-                    abs(target[0] - robot.position[0])
-                    + abs(target[1] - robot.position[1])
+                delta = (
+                    target[0] - robot.position[0],
+                    target[1] - robot.position[1],
                 )
+                distance = abs(delta[0]) + abs(delta[1])
                 if distance != 1:
                     raise SimulationError(
                         f"Robot {action.robot_id} move from {robot.position} to {target} "
                         "is not a one-cell orthogonal move"
                     )
 
-                if target in pallet_by_position:
-                    raise SimulationError(
-                        f"Robot {action.robot_id} cannot move into pallet at {target}"
+                own_entities: Set[EntityKey] = {("robot", action.robot_id)}
+                footprint_targets: List[Tuple[EntityKey, Position]] = [
+                    (("robot", action.robot_id), target)
+                ]
+
+                for pallet_id in robot.docked_pallets:
+                    pallet = self.world.pallets[pallet_id]
+                    own_entities.add(("pallet", pallet_id))
+                    pallet_target = (
+                        pallet.position[0] + delta[0],
+                        pallet.position[1] + delta[1],
+                    )
+                    footprint_targets.append(
+                        (("pallet", pallet_id), pallet_target)
                     )
 
-                occupying_robot = robot_positions.get(target)
-                if occupying_robot is not None:
-                    raise SimulationError(
-                        f"Robot {action.robot_id} cannot move into robot "
-                        f"{occupying_robot} at {target}"
-                    )
+                local_targets: Set[Position] = set()
+                for entity_key, target_position in footprint_targets:
+                    if not self.world.in_bounds(target_position):
+                        raise SimulationError(
+                            f"Robot {action.robot_id} docked footprint would leave "
+                            f"the grid at {target_position}"
+                        )
 
-                other_robot = destination_owners.get(target)
-                if other_robot is not None:
-                    raise SimulationError(
-                        f"Robots {other_robot} and {action.robot_id} both target "
-                        f"{target} at timestep {self.world.timestep}"
-                    )
+                    if target_position in local_targets:
+                        raise SimulationError(
+                            f"Robot {action.robot_id} docked footprint overlaps itself "
+                            f"at {target_position}"
+                        )
+                    local_targets.add(target_position)
 
-                destination_owners[target] = action.robot_id
-                proposed_positions[action.robot_id] = target
+                    occupant = entity_by_position.get(target_position)
+                    if occupant is not None and occupant not in own_entities:
+                        occupant_type, occupant_id = occupant
+                        if entity_key[0] == "robot":
+                            if occupant_type == "pallet":
+                                raise SimulationError(
+                                    f"Robot {action.robot_id} cannot move into pallet "
+                                    f"{occupant_id} at {target_position}"
+                                )
+                            raise SimulationError(
+                                f"Robot {action.robot_id} cannot move into robot "
+                                f"{occupant_id} at {target_position}"
+                            )
+
+                        raise SimulationError(
+                            f"Robot {action.robot_id} docked pallet {entity_key[1]} "
+                            f"would collide with {occupant_type} {occupant_id} at "
+                            f"{target_position}"
+                        )
+
+                    other_robot = proposed_cell_owners.get(target_position)
+                    if (
+                        other_robot is not None
+                        and other_robot != action.robot_id
+                    ):
+                        raise SimulationError(
+                            f"Robots {other_robot} and {action.robot_id} both target "
+                            f"{target_position} at timestep {self.world.timestep}"
+                        )
+
+                for entity_key, target_position in footprint_targets:
+                    proposed_cell_owners[target_position] = action.robot_id
+                    if entity_key[0] == "robot":
+                        proposed_robot_positions[action.robot_id] = target_position
+                    else:
+                        proposed_pallet_positions[entity_key[1]] = target_position
 
             elif action.action == ActionType.PICK:
                 pallet = pallet_by_position.get(action.target)
@@ -128,6 +184,75 @@ class Simulator:
                 picks_per_pallet[pallet.pallet_id] = (
                     picks_per_pallet.get(pallet.pallet_id, 0) + 1
                 )
+
+            elif action.action == ActionType.DOCK:
+                pallet = pallet_by_position.get(action.target)
+                if pallet is None:
+                    raise SimulationError(
+                        f"Robot {action.robot_id} cannot dock at {action.target}; "
+                        "no pallet is there"
+                    )
+
+                distance = (
+                    abs(action.target[0] - robot.position[0])
+                    + abs(action.target[1] - robot.position[1])
+                )
+                if distance != 1:
+                    raise SimulationError(
+                        f"Robot {action.robot_id} at {robot.position} is not adjacent "
+                        f"to pallet {pallet.pallet_id} at {action.target}"
+                    )
+
+                if pallet.docked_to is not None:
+                    raise SimulationError(
+                        f"Pallet {pallet.pallet_id} is already docked to robot "
+                        f"{pallet.docked_to}"
+                    )
+
+                if pallet.pallet_id in reserved_dock_pallets:
+                    raise SimulationError(
+                        f"Pallet {pallet.pallet_id} is requested by multiple robots "
+                        f"at timestep {self.world.timestep}"
+                    )
+
+                if len(robot.docked_pallets) >= 4:
+                    raise SimulationError(
+                        f"Robot {action.robot_id} already has four docked pallets"
+                    )
+
+                offset = (
+                    action.target[0] - robot.position[0],
+                    action.target[1] - robot.position[1],
+                )
+                occupied_offsets = {
+                    self.world.pallets[pallet_id].docked_offset
+                    for pallet_id in robot.docked_pallets
+                }
+                if offset in occupied_offsets:
+                    raise SimulationError(
+                        f"Robot {action.robot_id} already has a pallet docked on "
+                        f"side {offset}"
+                    )
+
+                reserved_dock_pallets.add(pallet.pallet_id)
+                dock_requests[action.robot_id] = pallet.pallet_id
+                dock_offsets[action.robot_id] = offset
+
+            elif action.action == ActionType.UNDOCK:
+                pallet = pallet_by_position.get(action.target)
+                if pallet is None:
+                    raise SimulationError(
+                        f"Robot {action.robot_id} cannot undock at {action.target}; "
+                        "no pallet is there"
+                    )
+
+                if pallet.docked_to != action.robot_id:
+                    raise SimulationError(
+                        f"Pallet {pallet.pallet_id} is not docked to robot "
+                        f"{action.robot_id}"
+                    )
+
+                undock_requests[action.robot_id] = pallet.pallet_id
 
             elif action.action == ActionType.FULFILL:
                 if robot.position[1] != self.world.fulfillment_y:
@@ -171,13 +296,30 @@ class Simulator:
                 )
 
         # Only mutate the world after the entire timestep has been accepted.
-        for robot_id, target in proposed_positions.items():
+        for robot_id, target in proposed_robot_positions.items():
             self.world.robots[robot_id].position = target
+
+        for pallet_id, target in proposed_pallet_positions.items():
+            self.world.pallets[pallet_id].position = target
 
         for robot_id, pallet_id in pick_requests.items():
             pallet = self.world.pallets[pallet_id]
             pallet.count -= 1
             self.world.robots[robot_id].storage.append(pallet.sku)
+
+        for robot_id, pallet_id in dock_requests.items():
+            robot = self.world.robots[robot_id]
+            pallet = self.world.pallets[pallet_id]
+            pallet.docked_to = robot_id
+            pallet.docked_offset = dock_offsets[robot_id]
+            robot.docked_pallets.append(pallet_id)
+
+        for robot_id, pallet_id in undock_requests.items():
+            robot = self.world.robots[robot_id]
+            pallet = self.world.pallets[pallet_id]
+            robot.docked_pallets.remove(pallet_id)
+            pallet.docked_to = None
+            pallet.docked_offset = None
 
         for robot_id, order_id in fulfillment_orders.items():
             self.world.orders[order_id].fulfilled = True
