@@ -50,10 +50,35 @@ class TestReservationTable(unittest.TestCase):
 
         table.reserve_trajectory(trajectory, footprint)
 
-        self.assertEqual(table.cells[0], {(4, 5), (5, 5)})
+        # At the action-start state, both the current footprint and the cells
+        # it intends to enter are reserved to match simulator movement rules.
+        self.assertEqual(table.cells[0], {(4, 5), (5, 5), (6, 5)})
         self.assertEqual(table.cells[1], {(5, 5), (6, 5)})
         self.assertIn(((4, 5), (5, 5)), table.edges[0])
         self.assertIn(((5, 5), (6, 5)), table.edges[0])
+
+    def test_future_destination_is_reserved_before_arrival(self):
+        table = ReservationTable()
+        footprint = frozenset({(0, 0)})
+        trajectory = [
+            (0, (10, 10)),
+            (1, (11, 10)),
+            (2, (12, 10)),
+        ]
+
+        table.reserve_trajectory(trajectory, footprint)
+
+        # The robot enters (12, 10) during timestep 1, so a lower-priority
+        # robot may not still occupy that cell at the start of timestep 1.
+        self.assertFalse(table.cell_is_free(1, (12, 10)))
+        self.assertFalse(
+            table.transition_is_free(
+                1,
+                (12, 10),
+                (12, 10),
+                footprint,
+            )
+        )
 
     def test_docked_footprint_edge_swap_is_rejected(self):
         table = ReservationTable()
