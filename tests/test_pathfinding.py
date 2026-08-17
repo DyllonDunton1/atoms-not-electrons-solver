@@ -50,8 +50,11 @@ def bfs_distance(
 ) -> Optional[int]:
     """Simple BFS reference used to verify A* optimality."""
     blocked_positions: Set[Position] = {
-        pallet.position for pallet in world.pallets.values()
+        pallet.original_position for pallet in world.pallets.values()
     }
+    blocked_positions.update(
+        pallet.position for pallet in world.pallets.values()
+    )
     blocked_positions.update(blocked)
 
     if not world.in_bounds(start) or not world.in_bounds(goal):
@@ -119,6 +122,42 @@ class TestPathPlanner(unittest.TestCase):
         self.assertEqual(len(path) - 1, 4)
         self.assertNotIn((2, 1), path)
         assert_valid_path(self, path, blocked={(2, 1)})
+
+    def test_vacated_pallet_home_remains_blocked(self) -> None:
+        pallet = make_pallet(0, (2, 1))
+        pallet.position = (10, 10)
+        world = make_world([pallet])
+        planner = PathPlanner(world)
+
+        path = planner.find_path((1, 1), (3, 1))
+
+        self.assertEqual(len(path) - 1, 4)
+        self.assertNotIn(pallet.original_position, path)
+        self.assertNotIn(pallet.position, path)
+
+    def test_ignored_docked_pallet_can_leave_home_but_center_cannot_enter_it(self) -> None:
+        pallet = make_pallet(0, (2, 1))
+        world = make_world([pallet])
+        planner = PathPlanner(world)
+        footprint = frozenset({(0, 0), (1, 0)})
+
+        path = planner.find_path(
+            (1, 1),
+            (1, 3),
+            footprint=footprint,
+            ignored_pallet_ids=[0],
+        )
+
+        self.assertEqual(path, [(1, 1), (1, 2), (1, 3)])
+        self.assertEqual(
+            planner.find_path(
+                (1, 1),
+                pallet.original_position,
+                footprint=footprint,
+                ignored_pallet_ids=[0],
+            ),
+            [],
+        )
 
     def test_artificial_wall_forces_known_detour(self) -> None:
         wall = {(3, y) for y in range(5)}
