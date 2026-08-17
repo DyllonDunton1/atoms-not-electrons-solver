@@ -49,6 +49,8 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Prevents same-cell conflicts, head-on edge swaps, and entering cells another robot occupies at the action-start state.
   - A transition `A@t -> B@(t+1)` reserves `A@t`, `B@t`, and `B@(t+1)` so reservation semantics exactly match the simulator's conservative movement rule.
   - Reservations cover the full docked footprint, including every moving footprint edge.
+  - Deterministic priority is robot-ID order. Before a moving robot has been planned for the current timestep, its current footprint is treated as known occupancy only at `t`, not speculative occupancy at `t+1`.
+  - Once a higher-priority robot's trajectory is chosen, its normal full trajectory reservations are authoritative; lower-priority robots planned afterward must yield or spatially detour immediately around those committed reservations.
 
 - **Five-robot baseline**
   - `src/multi_robot_solver.py` remains the preserved correctness baseline.
@@ -130,8 +132,13 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Cause: the aisle plan correctly excluded unavailable pallets when it was built, but finishing the stored plan was treated as finishing the aisle even though live pallet availability could have changed during the visit.
   - Fix: after the last stored stop, rescan the current aisle using current claims and remaining requirements. If useful work is now available, extend the aisle plan without dropping the aisle commitment. No future release prediction or pallet queue is introduced.
 
+- **Adjacent active robots could deadlock instead of passing**
+  - Observed in the 5r/1000 run capped at 45,000 timesteps: robot 1 stopped at `(16,26)` after `t=40830` while robot 3 later stopped immediately ahead at `(16,25)`; independently, robot 2 stopped at `(33,28)` and robot 0 stopped behind it at `(33,29)`. Open side space existed for immediate passing.
+  - Cause: while planning a robot, every other active robot's current cell was provisionally reserved at both `t` and `t+1`. That speculative `t+1` occupancy let timed A* repeatedly prefer waiting for the blocking robot to disappear rather than committing the higher-priority trajectory and forcing the lower-priority robot to move aside.
+  - Fix: provisional occupancy for unplanned active robots is now reserved only at the known current state `t`. Actual chosen trajectories keep the existing conservative full reservations. Because robots are planned in ID order, the lower-ID trajectory can claim future space and the higher-ID robot planned afterward must yield or detour on the first available timestep.
+
 - **Regression coverage updated with each fix**
-  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, and final-aisle live-availability rescanning.
+  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, final-aisle live-availability rescanning, and immediate priority-based yielding between adjacent active robots.
   - Updated an older docking test whose expectation intentionally conflicted with the permanent-home-cell invariant.
 
 ## Current optimization boundary
