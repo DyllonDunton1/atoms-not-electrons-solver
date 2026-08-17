@@ -16,7 +16,7 @@ TOP_AISLE_CANDIDATES = 3
 
 @dataclass(frozen=True)
 class Aisle:
-    """One connected pallet island in the warehouse."""
+    """One connected 2 x 10 pallet island in the warehouse."""
 
     aisle_id: int
     pallet_ids: Tuple[int, ...]
@@ -407,6 +407,16 @@ class AislePlanner:
             options = result.setdefault(pallet.sku, [])
             for pickup in self.world.adjacent_positions(pallet.position):
                 if pickup in self.layout.home_to_aisle:
+                    continue
+                # If this stop will require a refill, do not choose a pickup
+                # above the pallet. Docking from above puts the pallet below
+                # the robot, which would place it at y=40 when the robot reaches
+                # replenishment row y=39.
+                if (
+                    quantity > pallet.count
+                    and pickup[0] == pallet.position[0]
+                    and pickup[1] == pallet.position[1] - 1
+                ):
                     continue
                 options.append(
                     _ServiceOption(
