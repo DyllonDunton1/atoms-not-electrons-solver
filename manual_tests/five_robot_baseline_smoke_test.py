@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from collections import Counter
 from pathlib import Path
 import sys
+import threading
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,46 @@ from src.writer import write_submission
 BIG_ORDER_PATH = REPO_ROOT / "source_material" / "BIG_ORDER.txt"
 
 
+def solve_with_progress(solver: MultiRobotSolver, label: str):
+    result = {}
+    error = {}
+
+    def run_solver() -> None:
+        try:
+            result["actions"] = solver.solve()
+        except BaseException as exception:
+            error["exception"] = exception
+
+    thread = threading.Thread(target=run_solver, daemon=True)
+    thread.start()
+
+    while thread.is_alive():
+        thread.join(timeout=2.0)
+        if not thread.is_alive():
+            break
+
+        active = {}
+        for robot_id in solver.active_robot_ids:
+            state = solver.states[robot_id]
+            if state.task is None:
+                active[robot_id] = "idle"
+            else:
+                active[robot_id] = f"order {state.task.order_id} / {state.phase}"
+
+        print(
+            f"[{label}] t={solver.world.timestep} "
+            f"completed={len(solver.completed_ids)}/{len(solver.target_ids)} "
+            f"assigned={len(solver.assigned_ids)} "
+            f"queued={len(solver.queue)} "
+            f"active={active}",
+            flush=True,
+        )
+
+    if "exception" in error:
+        raise error["exception"]
+    return result["actions"]
+
+
 def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("--robots", type=int, default=5, choices=range(1, 6))
@@ -36,7 +77,10 @@ def main() -> None:
         robot_ids=robot_ids,
         order_ids=order_ids,
     )
-    actions = solver.solve()
+    label = f"{args.robots} robots / {args.orders} orders"
+    actions = solve_with_progress(solver, label)
+
+    print("Generation complete. Replaying from fresh input...", flush=True)
 
     # Independent replay from untouched input catches schedule-generation bugs.
     replay_world = WorldState(parse_problem(BIG_ORDER_PATH))
