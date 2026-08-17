@@ -2,7 +2,7 @@
 
 import unittest
 
-from src.models import ProblemInstance
+from src.models import Pallet, ProblemInstance
 from src.scheduler import ReservationTable, Scheduler
 from src.world import WorldState
 
@@ -13,6 +13,25 @@ def make_empty_world():
             robots=[],
             sku_capacities=[],
             pallets=[],
+            orders=[],
+        )
+    )
+
+
+def make_world_with_pallet(position, original_position=None):
+    pallet = Pallet(
+        pallet_id=0,
+        position=position,
+        sku=0,
+        count=10,
+        max_count=10,
+        original_position=original_position or position,
+    )
+    return WorldState(
+        ProblemInstance(
+            robots=[],
+            sku_capacities=[10],
+            pallets=[pallet],
             orders=[],
         )
     )
@@ -112,6 +131,48 @@ class TestTimedPlanning(unittest.TestCase):
 
         self.assertTrue(trajectory)
         self.assertNotIn((2, (2, 1)), trajectory)
+
+    def test_vacated_pallet_home_remains_blocked(self):
+        scheduler = Scheduler(
+            make_world_with_pallet((10, 10), original_position=(2, 1))
+        )
+
+        trajectory = scheduler.plan_timed_path(
+            (1, 1),
+            (3, 1),
+            start_timestep=0,
+            max_timestep=10,
+        )
+
+        self.assertTrue(trajectory)
+        self.assertNotIn((2, 1), [position for _, position in trajectory])
+
+    def test_ignored_docked_pallet_can_leave_home_but_center_cannot_enter_it(self):
+        scheduler = Scheduler(make_world_with_pallet((2, 1)))
+        footprint = frozenset({(0, 0), (1, 0)})
+
+        trajectory = scheduler.plan_timed_path(
+            (1, 1),
+            (1, 3),
+            start_timestep=0,
+            footprint=footprint,
+            ignored_pallet_ids=[0],
+            max_timestep=10,
+        )
+
+        self.assertTrue(trajectory)
+        self.assertEqual(trajectory[-1], (2, (1, 3)))
+        self.assertEqual(
+            scheduler.plan_timed_path(
+                (1, 1),
+                (2, 1),
+                start_timestep=0,
+                footprint=footprint,
+                ignored_pallet_ids=[0],
+                max_timestep=10,
+            ),
+            [],
+        )
 
     def test_robot_can_wait_then_continue_through_same_location(self):
         scheduler = Scheduler(make_empty_world())
