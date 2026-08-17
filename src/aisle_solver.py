@@ -172,6 +172,41 @@ class AisleAwareSolver(MultiRobotSolver):
         state.aisle_stop_index = 0
         return True
 
+    def _extend_active_aisle_if_useful(self, robot_id: int) -> bool:
+        """Rescan the current aisle before leaving it.
+
+        A pallet that was busy when the original aisle plan was built may have
+        become available while this robot serviced other stops in the aisle.
+        We do not predict future releases or reserve a place in line; this is a
+        single live-availability replan from the robot's current position.
+        """
+        state = self.states[robot_id]
+        aisle_id = state.active_aisle_id
+        if aisle_id is None or not state.remaining_by_sku:
+            return False
+
+        self._release_pallet(robot_id)
+        state.pallet_id = None
+        state.pickup = None
+        state.remaining = 0
+        state.row_goal = None
+        state.movement = None
+
+        plan = self.aisle_planner.plan_aisle(
+            aisle_id,
+            self.world.robots[robot_id].position,
+            state.remaining_by_sku,
+            congestion=self._aisle_congestion(robot_id).get(aisle_id, 0),
+            unavailable_pallet_ids=self._unavailable_pallet_ids(robot_id),
+            blocked=self._permanent_robot_cells(robot_id),
+        )
+        if plan is None:
+            return False
+
+        state.aisle_plan = plan
+        state.aisle_stop_index = 0
+        return True
+
     def _current_stop(self, robot_id: int) -> Optional[AisleStop]:
         state = self.states[robot_id]
         plan = state.aisle_plan
@@ -212,13 +247,15 @@ class AisleAwareSolver(MultiRobotSolver):
             state.aisle_plan is None
             or state.aisle_stop_index >= len(state.aisle_plan.stops)
         ):
-            self._finish_active_aisle(robot_id)
+            if not self._extend_active_aisle_if_useful(robot_id):
+                self._finish_active_aisle(robot_id)
 
     def _activate_current_stop(self, robot_id: int) -> bool:
         state = self.states[robot_id]
         stop = self._current_stop(robot_id)
         if stop is None:
-            self._finish_active_aisle(robot_id)
+            if not self._extend_active_aisle_if_useful(robot_id):
+                self._finish_active_aisle(robot_id)
             return False
 
         quantity = state.remaining_by_sku.get(stop.sku, 0)
@@ -282,7 +319,8 @@ class AisleAwareSolver(MultiRobotSolver):
 
                 stop = self._current_stop(robot_id)
                 if stop is None:
-                    self._finish_active_aisle(robot_id)
+                    if not self._extend_active_aisle_if_useful(robot_id):
+                        self._finish_active_aisle(robot_id)
                     continue
                 if state.remaining_by_sku.get(stop.sku, 0) <= 0:
                     self._advance_stop(robot_id)
@@ -290,6 +328,8 @@ class AisleAwareSolver(MultiRobotSolver):
 
                 if state.pallet_id is None:
                     if not self._activate_current_stop(robot_id):
+                        if state.aisle_plan is None:
+                            continue
                         if not self._replan_active_aisle(robot_id):
                             return Intent()
                         continue
