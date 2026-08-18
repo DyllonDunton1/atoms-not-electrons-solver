@@ -4,26 +4,19 @@ A Python solver for Tutor Intelligence's **Atoms Not Electrons** warehouse optim
 
 Challenge site: https://www.atomsnotelectrons.com
 
-## The Challenge
+## The challenge
 
-The warehouse is a **60 x 40 grid** containing:
+The warehouse is a **60 x 40 grid** containing 5 robots, 100 SKU types, 240 pallets, and 1,000 orders. Fulfillment happens on `y = 0`; replenishment happens on `y = 39`.
 
-- 5 robots
-- 100 SKU types
-- 240 pallets
-- 1,000 orders
-- A fulfillment row at `y = 0`
-- A replenishment row at `y = 39`
+Each robot can perform at most one action per timestep. Robots move one orthogonal grid cell at a time, pick items from adjacent pallets, dock to pallets, move docked pallets as a rigid footprint, replenish them at the bottom row, and fulfill completed orders at the top row.
 
-Each robot can perform at most one action per timestep. Robots move one grid cell at a time, pick items from adjacent pallets, dock to pallets, move docked pallets, replenish them at the bottom row, and fulfill completed orders at the top row.
-
-A robot can fulfill an order only when its internal storage **exactly matches** an unfulfilled order. Pallets have finite stock, so robots must eventually dock to depleted pallets and bring them to the replenishment row.
+A robot can fulfill an order only when its internal storage exactly matches an unfulfilled order. Pallets have finite stock, so depleted pallets eventually need a refill trip.
 
 The score is the total number of timesteps required to fulfill all 1,000 orders. **Lower is better.**
 
-## Submission Format
+## Submission format
 
-The solver produces a text file containing robot commands in the form:
+The solver writes actions as:
 
 ```text
 <timestep> <robot_id> <action> <x> <y>
@@ -38,89 +31,102 @@ For example:
 2 0 move 25 21
 ```
 
-The generated file can be uploaded to the online Testbench for validation and visualization.
+Missing robot actions are waits. Generated schedules are replayed locally through the simulator before being uploaded to Tutor's Testbench for final visualization/validation.
 
-## Baseline Solver
+## Current solver strategy
 
-The first goal of this project is a simple, correct baseline rather than an immediately optimal solution.
+The project is built correctness-first and keeps navigation, traffic, task execution, and optimization separate.
 
-The baseline design is:
+1. Parse `BIG_ORDER.txt` into a mutable world model.
+2. Assign unfulfilled orders through a deterministic FIFO queue.
+3. Use aisle-aware collection planning to group useful pallet stops and reduce repeated travel.
+4. Use static footprint-aware A* to calculate each robot's preferred route.
+5. Recompute fleet traffic every timestep in robot-ID order and commit only the first move of each route.
+6. Lower numeric robot IDs have priority. Higher-ID robots spatially route around already-committed lower-ID footprints.
+7. Lower-ID robots do not take large speculative detours around active higher-ID robots. If the preferred first step is still physically occupied, they wait and recompute next timestep.
+8. Every movement check uses the complete robot + docked-pallet rigid footprint.
+9. If stock runs out, the current robot docks the pallet, carries it to `y = 39`, returns it home after replenishment, undocks, and resumes collection.
+10. Once storage exactly matches the assigned order, the robot travels to `y = 0` and fulfills it.
 
-1. Parse `BIG_ORDER.txt` into a world model.
-2. Maintain a queue of unfulfilled orders.
-3. Assign the next available order to the next available robot.
-4. Select pallets containing the required SKUs.
-5. Use shortest-path planning to move robots through the warehouse.
-6. Reserve space over time so planned robot paths do not collide.
-7. If a required pallet runs out of stock, the robot using it docks to it, carries it to `y = 39`, replenishes it, returns it to its original location, and resumes the order.
-8. Once a robot's storage exactly matches its assigned order, route it to `y = 0` and fulfill the order.
-9. Repeat until all 1,000 orders are complete.
+There is deliberately **no multi-timestep prediction of other robots' future positions** in the current traffic layer. The solver plans a complete spatial route for guidance, commits one safe first step, advances the simulator, then starts traffic planning again from the new real world state.
 
-This intentionally leaves more advanced optimization for later iterations.
+## Traffic priority in one sentence
+
+> Lower-ID robots own the preferred route; higher-ID robots adapt around lower-ID current/committed rigid footprints, while real current occupancy can still force a one-timestep wait.
+
+This keeps priority separate from physical reality. A lower-ID robot may plan straight through where a higher-ID robot is standing because that traffic should eventually clear, but it still cannot execute an overlapping first move while the higher-ID footprint is actually there.
 
 ## Architecture
 
 ```text
 atoms-not-electrons-solver/
 ├── README.md
-├── .gitignore
+├── DEVELOPMENT_MANIFEST.md
+├── source_material/
+│   ├── BIG_ORDER.txt
+│   └── CHALLENGE_README.md
 ├── src/
-│   ├── __init__.py
-│   ├── parser.py
 │   ├── models.py
+│   ├── parser.py
 │   ├── world.py
 │   ├── pathfinding.py
 │   ├── scheduler.py
+│   ├── simulator.py
 │   ├── tasks.py
 │   ├── allocator.py
-│   ├── simulator.py
 │   ├── solver.py
+│   ├── multi_robot_solver.py
+│   ├── aisles.py
+│   ├── aisle_solver.py
+│   ├── metrics.py
 │   └── writer.py
 ├── tests/
-│   ├── test_parser.py
-│   ├── test_pathfinding.py
-│   ├── test_simulator.py
-│   └── test_docking.py
+│   ├── README.md
+│   └── test_*.py
+├── manual_tests/
 └── outputs/
-    └── .gitkeep
 ```
 
-### Module Responsibilities
+### Module responsibilities
 
-- **`parser.py`** — Read `BIG_ORDER.txt` and construct the initial problem state.
-- **`models.py`** — Core data classes such as robots, pallets, orders, actions, and tasks.
-- **`world.py`** — Warehouse state, occupancy, inventory, and rule checks.
-- **`pathfinding.py`** — Shortest-path planning for robots and docked robot footprints.
-- **`scheduler.py`** — Time-based reservations and multi-robot collision avoidance.
-- **`tasks.py`** — Order fulfillment and replenishment task definitions.
-- **`allocator.py`** — Assign queued work to available robots.
-- **`simulator.py`** — Execute and validate generated actions locally.
-- **`solver.py`** — Main coordination loop.
-- **`writer.py`** — Export the final action schedule in challenge submission format.
+- **`models.py`** — Core data classes for robots, pallets, orders, and actions.
+- **`parser.py`** — Parse the challenge input.
+- **`world.py`** — Warehouse state, occupancy, and invariants.
+- **`pathfinding.py`** — Static A* for arbitrary rigid robot footprints.
+- **`scheduler.py`** — One-timestep reservation primitives for already-committed lower-ID moves.
+- **`simulator.py`** — Final authority on action legality and state mutation.
+- **`tasks.py` / `allocator.py`** — FIFO task representation and assignment.
+- **`solver.py`** — Original single-robot baseline.
+- **`multi_robot_solver.py`** — Five-robot FIFO execution plus the simple one-step priority traffic layer.
+- **`aisles.py`** — Aisle geometry, scoring, and service-route planning.
+- **`aisle_solver.py`** — Aisle-aware five-robot strategy using the same traffic layer.
+- **`metrics.py`** — Schedule/robot/aisle performance reporting.
+- **`writer.py`** — Challenge submission-file output.
 
-## Planned Development Order
+## Testing
 
-The initial implementation will be built incrementally:
+Run the whole automated suite from the repository root:
 
-1. Parse the challenge input.
-2. Build the world and data models.
-3. Implement static shortest-path planning.
-4. Implement the local simulator and rule validation.
-5. Complete orders with one robot.
-6. Add all five robots.
-7. Add time-based collision reservations.
-8. Add pallet docking and replenishment.
-9. Produce a complete 1,000-order baseline submission.
-10. Measure bottlenecks and begin optimization.
-
-Later strategies may include improved task allocation, order reordering, pallet relocation, high-runner SKU staging, predictive replenishment, and search-based optimization.
-
-## Running
-
-The exact command-line interface will be added as the implementation develops. The intended workflow is:
-
-```text
-BIG_ORDER.txt -> solver -> local validation -> submission.txt -> online Testbench
+```bash
+python3 -m unittest discover -s tests
 ```
 
-The online Testbench remains the final source of truth for challenge validation and visualization.
+Run a single module while iterating:
+
+```bash
+python3 -m unittest tests.test_multi_robot_solver -v
+```
+
+See [`tests/README.md`](tests/README.md) for the file-by-file guide. `test_multi_robot_solver.py` contains the main fleet-traffic regressions, including rigid docked footprints, the replenishment-row clearance case, the south-docked-pallet wall case, and waiting while a higher-ID robot is picking.
+
+## Performance history
+
+The original full FIFO baseline completed in **161,470 timesteps**. A later aisle-aware version completed all 1,000 orders in **67,840 timesteps**, with collection movement reduced from 703,548 to 229,603 moves.
+
+Those runs used older traffic implementations. The simplified one-step priority scheduler needs a fresh full-run benchmark before its performance is treated as the current baseline.
+
+## Planned traffic optimization
+
+Soft directional warehouse traffic remains a later experiment rather than a correctness dependency. The idea is to give small cost preferences to opposing north/south lanes and center east/west lanes so head-on encounters become rarer without making any direction illegal.
+
+The simple scheduler should be measured first; then soft traffic can be compared as an isolated optimization.
