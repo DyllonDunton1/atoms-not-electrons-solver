@@ -51,7 +51,7 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Reservations cover the full docked footprint, including every moving footprint edge.
   - Deterministic priority is robot-ID order. Before a moving robot has been planned for the current timestep, its current footprint is treated as known occupancy only at `t`, not speculative occupancy at `t+1`.
   - Once a higher-priority robot's trajectory is chosen, its normal full trajectory reservations are authoritative; lower-priority robots planned afterward must yield or spatially detour immediately around those committed reservations.
-  - Before committing a priority trajectory, the solver checks every still-unplanned lower-priority moving robot for at least one legal immediate transition. If the proposed trajectory would remove both waiting and every legal first move, the solver preserves that robot's best currently legal escape transition, replans the higher-priority trajectory around it, and then forces the yielding robot to execute that first move. This prevents a rigid docked footprint from being trapped by an otherwise valid higher-priority claim without adding a stall timer or deliberate recovery delay.
+  - Before committing a priority trajectory, the solver checks every still-unplanned lower-priority moving robot for legal immediate transitions. If waiting is made illegal but one or more compatible first moves remain, the best such move is forced immediately instead of relying on a full route to be found first. If the proposed trajectory removes both waiting and every legal first move, the solver preserves that robot's best currently legal escape transition, replans the higher-priority trajectory around it, and then forces the yielding robot to execute that first move. This prevents rigid docked footprints from being trapped without adding a stall timer or deliberate recovery delay.
 
 - **Five-robot baseline**
   - `src/multi_robot_solver.py` remains the preserved correctness baseline.
@@ -105,7 +105,7 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Primary: reduce **703,548 baseline collection moves**.
   - Structural indicator: reduce **19,903 baseline aisle re-entries**.
   - Final objective: reduce the **161,470-timestep** makespan without weakening any correctness invariant.
-  - Compare 5r/10, then 5r/100, then the full 5r/1000 benchmark before adding another optimization.
+  - First completed full 5r/1000 aisle-aware run: **67,840 timesteps**, **263,139 moves**, **229,603 collection moves**, **8,491 aisle visits**, and **25 aisle re-entries**. That run still contained one roughly 3,830-timestep soft traffic deadlock between robots 3 and 4, so it is a valid completion benchmark but not yet the expected post-fix performance floor.
 
 ## Failure history and fixes
 
@@ -143,8 +143,13 @@ Concise design notes, failure history, and optimization experiments for the solv
   - Cause: treating an unplanned robot's future center as free was correct for ordinary single-cell yielding, but a rigid docked footprint may need one of its current cells as a swept footprint cell during the yield transition.
   - Fix: before a higher-priority trajectory is committed, test whether every lower-priority moving robot can still either wait or make at least one legal one-step move with its full current footprint. If not, select its best legal immediate escape from the pre-commit state, reserve that transition while replanning the higher-priority trajectory, and force the lower-priority robot to execute the escape when its turn is planned. The response is immediate; there is no wait threshold or deadlock-recovery timer.
 
+- **Legal side-step was available but not forced**
+  - Observed in the first completed 5r/1000 aisle-aware run: robots 3 and 4 reached adjacent replenishment-area positions around `t=43747` while carrying rigid east-side pallets, then remained inactive until roughly `t=47577`. Their per-robot metrics showed 4,253 and 4,091 internal waits respectively, while the other three robots had only 176, 313, and 314.
+  - Cause: the priority check used `if can_wait or legal_moves: continue`. When a higher-priority trajectory made waiting illegal but still left a legal sideways move, the solver did not force that move; it deferred to normal full-route planning. If no complete continuation fit the current reservation horizon, the lower-priority robot simply emitted no move even though an immediate escape was legal.
+  - Fix: split the cases. If waiting remains legal, normal planning may continue. If waiting is illegal and compatible one-step moves remain, force the best one immediately. Only when both waiting and all first moves are eliminated by the proposed higher-priority trajectory do we fall back to preserving a pre-commit escape and replanning the higher-priority trajectory around it.
+
 - **Regression coverage updated with each fix**
-  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, final-aisle live-availability rescanning, immediate priority-based yielding between adjacent active robots, and rigid docked-footprint escape preservation.
+  - Added tests for conservative destination reservations, vacated pallet-home blocking, timed pallet-home blocking, docked-pallet home-cell behavior, deterministic aisle grouping, aisle scoring, partial aisle plans, refill-safe pickup selection, aisle-aware fleet replay, refill-resume behavior, final-aisle live-availability rescanning, immediate priority-based yielding between adjacent active robots, rigid docked-footprint escape preservation, and forced-yield execution when waiting is blocked despite an available legal side-step.
   - Updated an older docking test whose expectation intentionally conflicted with the permanent-home-cell invariant.
 
 ## Current optimization boundary
