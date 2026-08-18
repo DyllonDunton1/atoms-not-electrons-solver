@@ -103,7 +103,39 @@ class AisleAwareSolver(MultiRobotSolver):
                 congestion[other_state.active_aisle_id] += 1
         return dict(congestion)
 
+    def _priority_adjacent_pallet_ids(self, robot_id: int) -> Set[int]:
+        """Return unclaimed pallet choices temporarily yielded to higher priority.
+
+        When a robot is choosing or replanning future aisle stops, any undocked
+        pallet currently adjacent to an active lower-ID robot is treated as
+        temporarily unavailable. This breaks the warehouse-specific case where
+        two neighboring robots finish stops and immediately choose each other's
+        pallet positions. The rule is only a stop-selection preference; it does
+        not preempt an already-active stop or remove a pallet claim.
+        """
+        pallet_by_position = {
+            pallet.position: pallet.pallet_id
+            for pallet in self.world.pallets.values()
+            if pallet.docked_to is None
+        }
+        unavailable: Set[int] = set()
+
+        for higher_priority_id in self.active_robot_ids:
+            if higher_priority_id >= robot_id:
+                break
+            if self._robot_is_permanently_idle(higher_priority_id):
+                continue
+
+            higher_priority_position = self.world.robots[higher_priority_id].position
+            for adjacent in self.world.adjacent_positions(higher_priority_position):
+                pallet_id = pallet_by_position.get(adjacent)
+                if pallet_id is not None:
+                    unavailable.add(pallet_id)
+
+        return unavailable
+
     def _unavailable_pallet_ids(self, robot_id: int) -> Set[int]:
+        """Return pallet ids excluded from new aisle-stop selection right now."""
         unavailable = {
             pallet_id
             for pallet_id, owner in self.pallet_claims.items()
@@ -114,6 +146,14 @@ class AisleAwareSolver(MultiRobotSolver):
             for pallet in self.world.pallets.values()
             if pallet.docked_to is not None and pallet.docked_to != robot_id
         )
+
+        priority_adjacent = self._priority_adjacent_pallet_ids(robot_id)
+        active_pallet_id = self.states[robot_id].pallet_id
+        if active_pallet_id is not None:
+            # A higher-priority robot merely passing the pallet must never kick
+            # this robot off an already-active stop.
+            priority_adjacent.discard(active_pallet_id)
+        unavailable.update(priority_adjacent)
         return unavailable
 
     def _select_new_aisle(self, robot_id: int) -> bool:
