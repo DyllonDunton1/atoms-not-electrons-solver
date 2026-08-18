@@ -105,11 +105,22 @@ class TestMultiRobotSolver(unittest.TestCase):
             order_ids=[0, 1],
             max_timesteps=20,
         )
-        intents = {
-            0: Intent(move_goal=(5, 4)),
-            1: Intent(move_goal=(5, 7)),
+        goals = {
+            0: (5, 4),
+            1: (5, 7),
         }
 
+        def current_intents():
+            return {
+                robot_id: (
+                    Intent()
+                    if world.robots[robot_id].position == goal
+                    else Intent(move_goal=goal)
+                )
+                for robot_id, goal in goals.items()
+            }
+
+        intents = current_intents()
         forced_calls = []
         original_forced_plan = solver._plan_with_forced_first_move
 
@@ -134,6 +145,7 @@ class TestMultiRobotSolver(unittest.TestCase):
         solver.simulator.step(first_actions)
         solver._advance_movement_cache(chosen)
 
+        intents = current_intents()
         second_actions, chosen = solver._plan_moves(intents)
         second_by_robot = {action.robot_id: action for action in second_actions}
         self.assertIn(0, second_by_robot)
@@ -143,17 +155,18 @@ class TestMultiRobotSolver(unittest.TestCase):
         solver._advance_movement_cache(chosen)
 
         for _ in range(8):
-            if (
-                world.robots[0].position == (5, 4)
-                and world.robots[1].position == (5, 7)
+            if all(
+                world.robots[robot_id].position == goal
+                for robot_id, goal in goals.items()
             ):
                 break
+            intents = current_intents()
             actions, chosen = solver._plan_moves(intents)
             solver.simulator.step(actions)
             solver._advance_movement_cache(chosen)
 
-        self.assertEqual(world.robots[0].position, (5, 4))
-        self.assertEqual(world.robots[1].position, (5, 7))
+        self.assertEqual(world.robots[0].position, goals[0])
+        self.assertEqual(world.robots[1].position, goals[1])
 
     def test_docked_lower_priority_robot_keeps_immediate_escape(self):
         # Mirrors the t=7461 long-run failure: robot 1 carries a pallet on its
