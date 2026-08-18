@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from .allocator import TaskAllocator, TaskQueue
 from .models import Action, ActionType, Order, Position
 from .pathfinding import Footprint, PathPlanner, SINGLE_ROBOT_FOOTPRINT
-from .scheduler import ReservationTable, Scheduler, TimedPosition
+from .scheduler import ReservationTable
 from .simulator import Simulator
 from .tasks import FulfillOrderTask, TaskStatus
 from .world import WorldState
@@ -19,13 +19,6 @@ COLLECT = "collect"
 TO_REFILL = "to_refill"
 RETURN_REFILL = "return_refill"
 FULFILL = "fulfill"
-PATH_SLACK = 20
-
-
-@dataclass
-class MovementPlan:
-    goal: Position
-    trajectory: List[TimedPosition]
 
 
 @dataclass
@@ -40,7 +33,6 @@ class RobotState:
     refill_robot_home: Optional[Position] = None
     refill_pallet_home: Optional[Position] = None
     row_goal: Optional[Position] = None
-    movement: Optional[MovementPlan] = None
 
 
 @dataclass(frozen=True)
@@ -51,7 +43,7 @@ class Intent:
 
 
 class MultiRobotSolver:
-    """FIFO order execution with deterministic prioritized collision avoidance."""
+    """FIFO execution with deterministic one-step robot-ID priority."""
 
     def __init__(
         self,
@@ -109,9 +101,14 @@ class MultiRobotSolver:
     def _footprint(self, robot_id: int) -> Footprint:
         return self.spatial.footprint_for_robot(robot_id)
 
+    def _footprint_cells_at(self, robot_id: int, center: Position) -> Set[Position]:
+        return ReservationTable.footprint_cells(center, self._footprint(robot_id))
+
     def _footprint_cells(self, robot_id: int) -> Set[Position]:
-        robot = self.world.robots[robot_id]
-        return ReservationTable.footprint_cells(robot.position, self._footprint(robot_id))
+        return self._footprint_cells_at(
+            robot_id,
+            self.world.robots[robot_id].position,
+        )
 
     def _robot_is_permanently_idle(self, robot_id: int) -> bool:
         """Return whether a robot has no remaining chance to receive work."""
@@ -128,6 +125,7 @@ class MultiRobotSolver:
         return blocked
 
     def _other_robot_cells(self, robot_id: int) -> Set[Position]:
+        """Return every cell occupied right now by another rigid robot footprint."""
         blocked: Set[Position] = set()
         for other_id in self.world.robots:
             if other_id != robot_id:
@@ -265,7 +263,6 @@ class MultiRobotSolver:
         self.pallet_claims[pallet_id] = robot_id
         state.pallet_id = pallet_id
         state.pickup = pickup
-        state.movement = None
         return True
 
     def _release_pallet(self, robot_id: int) -> None:
@@ -278,7 +275,6 @@ class MultiRobotSolver:
         self._release_pallet(robot_id)
         state.pallet_id = None
         state.pickup = None
-        state.movement = None
         state.row_goal = None
         state.sku_index += 1
 
@@ -315,7 +311,6 @@ class MultiRobotSolver:
                 if pallet.count < state.remaining:
                     state.refill_robot_home = robot.position
                     state.refill_pallet_home = pallet.position
-                    state.movement = None
                     return Intent(ActionType.DOCK, pallet.position)
 
                 return Intent(ActionType.PICK, pallet.position)
@@ -324,7 +319,6 @@ class MultiRobotSolver:
                 if robot.position[1] == self.world.replenishment_y:
                     state.phase = RETURN_REFILL
                     state.row_goal = None
-                    state.movement = None
                     continue
 
                 footprint = self._footprint(robot_id)
@@ -334,7 +328,6 @@ class MultiRobotSolver:
                     footprint,
                 ):
                     state.row_goal = None
-                    state.movement = None
 
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
@@ -369,7 +362,6 @@ class MultiRobotSolver:
                     SINGLE_ROBOT_FOOTPRINT,
                 ):
                     state.row_goal = None
-                    state.movement = None
 
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
@@ -385,347 +377,139 @@ class MultiRobotSolver:
 
         raise RuntimeError("Robot state machine did not settle")
 
-    def _cached_plan_usable(
+    def _ignored_docked_pallet_ids_for_path(self, robot_id: int) -> Set[int]:
+        """Return docked pallets that must not distort this robot's preferred path.
+
+        A robot always ignores its own carried pallets because they are already
+        represented by its moving footprint. Active higher-ID robots also have
+        lower priority, so their complete moving assemblies are ignored while
+        this robot chooses its preferred spatial route. Their real current
+        footprint is still enforced before the first move is executed.
+        """
+        ignored = set(self.world.robots[robot_id].docked_pallets)
+        for other_id, other_robot in self.world.robots.items():
+            if other_id <= robot_id:
+                continue
+            if self._robot_is_permanently_idle(other_id):
+                continue
+            ignored.update(other_robot.docked_pallets)
+        return ignored
+
+    def _priority_blocked_cells(
+        self,
+        robot_id: int,
+        committed_destinations: Dict[int, Position],
+    ) -> Set[Position]:
+        """Return static blockers used for this robot's one-step route choice.
+
+        Finished/inactive robots are always obstacles. Active lower-ID robots
+        also act as obstacles because they have priority; both their current
+        rigid footprint and the first move already committed this timestep are
+        blocked. Higher-ID active robots are intentionally omitted from this
+        route calculation and must adapt when their own turn is planned.
+        """
+        blocked = set(self._permanent_robot_cells(robot_id))
+        for lower_id in sorted(self.world.robots):
+            if lower_id >= robot_id:
+                break
+            if self._robot_is_permanently_idle(lower_id):
+                continue
+            blocked.update(self._footprint_cells(lower_id))
+            destination = committed_destinations.get(lower_id)
+            if destination is not None:
+                blocked.update(self._footprint_cells_at(lower_id, destination))
+        return blocked
+
+    def _preferred_path(
         self,
         robot_id: int,
         goal: Position,
-        scheduler: Scheduler,
-        blocked: Set[Position],
-    ) -> bool:
-        state = self.states[robot_id]
-        plan = state.movement
+        committed_destinations: Dict[int, Position],
+    ) -> List[Position]:
+        """Plan a full spatial route, then let the fleet use only its first step."""
         robot = self.world.robots[robot_id]
-        footprint = self._footprint(robot_id)
-
-        if (
-            plan is None
-            or plan.goal != goal
-            or not plan.trajectory
-            or plan.trajectory[0] != (self.world.timestep, robot.position)
-        ):
-            return False
-        if len(plan.trajectory) < 2:
-            return robot.position == goal
-
-        next_timestep, next_position = plan.trajectory[1]
-        if next_timestep != self.world.timestep + 1:
-            return False
-
-        next_cells = ReservationTable.footprint_cells(next_position, footprint)
-        if next_cells & blocked:
-            return False
-
-        pallet_cells = {
-            pallet.position
-            for pallet in self.world.pallets.values()
-            if pallet.docked_to is None
-        }
-        if next_cells & pallet_cells:
-            return False
-
-        return scheduler.reservations.transition_is_free(
-            self.world.timestep,
+        return self.spatial.find_path(
             robot.position,
-            next_position,
-            footprint,
+            goal,
+            footprint=self._footprint(robot_id),
+            blocked=self._priority_blocked_cells(robot_id, committed_destinations),
+            ignored_pallet_ids=self._ignored_docked_pallet_ids_for_path(robot_id),
         )
 
-    def _copy_scheduler(self, scheduler: Scheduler) -> Scheduler:
-        copied = Scheduler(self.world)
-        for reserved_timestep, cells in scheduler.reservations.cells.items():
-            copied.reservations.cells[reserved_timestep].update(cells)
-        for reserved_timestep, edges in scheduler.reservations.edges.items():
-            copied.reservations.edges[reserved_timestep].update(edges)
-        return copied
-
-    def _scheduler_with_forced_moves(
+    def _first_step_is_physically_free(
         self,
-        scheduler: Scheduler,
-        forced_first_moves: Dict[int, Position],
-        *,
-        exclude_robot_id: Optional[int] = None,
-    ) -> Scheduler:
-        copied = self._copy_scheduler(scheduler)
+        robot_id: int,
+        destination: Position,
+    ) -> bool:
+        """Reject entering any other robot's current rigid footprint.
+
+        This is deliberately stricter than the preferred-path calculation.
+        Lower-ID robots may plan through higher-ID traffic, but the simulator
+        does not allow them to enter cells that are still occupied at the start
+        of the timestep. In that case they wait and replan from the next real
+        world state instead of taking a speculative detour.
+        """
+        destination_cells = self._footprint_cells_at(robot_id, destination)
+        return not bool(destination_cells & self._other_robot_cells(robot_id))
+
+    def _plan_moves(self, intents: Dict[int, Intent]) -> List[Action]:
+        """Choose at most one safe move per robot using deterministic ID priority.
+
+        Each robot recomputes a full spatial route from the current world state.
+        Only the first step is considered for execution. Lower-ID robots choose
+        first; higher-ID robots treat those committed transitions as obstacles.
+        If a preferred first step is occupied by higher-ID traffic, the robot
+        waits rather than rerouting around a robot that is responsible for
+        clearing the way.
+        """
         timestep = self.world.timestep
-        for other_id, destination in sorted(forced_first_moves.items()):
-            if other_id == exclude_robot_id:
-                continue
-            start = self.world.robots[other_id].position
-            copied.reservations.reserve_transition(
+        reservations = ReservationTable()
+        committed_destinations: Dict[int, Position] = {}
+        actions: List[Action] = []
+
+        for robot_id in sorted(self.world.robots):
+            robot = self.world.robots[robot_id]
+            start = robot.position
+            footprint = self._footprint(robot_id)
+            destination = start
+            goal = intents[robot_id].move_goal
+
+            if goal is not None:
+                path = self._preferred_path(
+                    robot_id,
+                    goal,
+                    committed_destinations,
+                )
+                if len(path) >= 2:
+                    candidate = path[1]
+                    if (
+                        self._first_step_is_physically_free(robot_id, candidate)
+                        and reservations.transition_is_free(
+                            timestep,
+                            start,
+                            candidate,
+                            footprint,
+                        )
+                    ):
+                        destination = candidate
+                        actions.append(
+                            Action(
+                                timestep,
+                                robot_id,
+                                ActionType.MOVE,
+                                candidate,
+                            )
+                        )
+
+            reservations.reserve_transition(
                 timestep,
                 start,
                 destination,
-                self._footprint(other_id),
+                footprint,
             )
-        return copied
+            committed_destinations[robot_id] = destination
 
-    def _planning_scheduler(
-        self,
-        scheduler: Scheduler,
-        robot_id: int,
-        forced_first_moves: Dict[int, Position],
-    ) -> Scheduler:
-        planning = self._scheduler_with_forced_moves(
-            scheduler,
-            forced_first_moves,
-            exclude_robot_id=robot_id,
-        )
-        timestep = self.world.timestep
-        permanent_blocked = self._permanent_robot_cells(robot_id)
-        temporary_blocked = self._other_robot_cells(robot_id) - permanent_blocked
-
-        # Other active robots definitely occupy their current cells at t, but
-        # their future cells are left to deterministic priority planning.
-        for position in temporary_blocked:
-            if planning.reservations.cell_is_free(timestep, position):
-                planning.reservations.reserve_cell(timestep, position)
-        return planning
-
-    def _immediate_options(
-        self,
-        robot_id: int,
-        scheduler: Scheduler,
-    ) -> Tuple[bool, List[Position]]:
-        """Return whether waiting is legal and every legal one-step move."""
-        check = self._planning_scheduler(scheduler, robot_id, {})
-        timestep = self.world.timestep
-        robot = self.world.robots[robot_id]
-        footprint = self._footprint(robot_id)
-        permanent_blocked = self._permanent_robot_cells(robot_id)
-        docked_pallet_ids = [
-            pallet.pallet_id
-            for pallet in self.world.pallets.values()
-            if pallet.docked_to is not None
-        ]
-
-        can_wait = check.reservations.transition_is_free(
-            timestep,
-            robot.position,
-            robot.position,
-            footprint,
-        )
-        moves: List[Position] = []
-        for destination in self.world.adjacent_positions(robot.position):
-            trajectory = check.plan_timed_path(
-                robot.position,
-                destination,
-                start_timestep=timestep,
-                footprint=footprint,
-                blocked=permanent_blocked,
-                ignored_pallet_ids=docked_pallet_ids,
-                max_timestep=timestep + 1,
-            )
-            if len(trajectory) == 2:
-                moves.append(destination)
-        return can_wait, moves
-
-    def _plan_with_forced_first_move(
-        self,
-        robot_id: int,
-        goal: Position,
-        scheduler: Scheduler,
-        destination: Position,
-    ) -> List[TimedPosition]:
-        timestep = self.world.timestep
-        robot = self.world.robots[robot_id]
-        footprint = self._footprint(robot_id)
-        permanent_blocked = self._permanent_robot_cells(robot_id)
-        docked_pallet_ids = [
-            pallet.pallet_id
-            for pallet in self.world.pallets.values()
-            if pallet.docked_to is not None
-        ]
-
-        first_step = scheduler.plan_timed_path(
-            robot.position,
-            destination,
-            start_timestep=timestep,
-            footprint=footprint,
-            blocked=permanent_blocked,
-            ignored_pallet_ids=docked_pallet_ids,
-            max_timestep=timestep + 1,
-        )
-        if len(first_step) != 2:
-            return []
-        if destination == goal:
-            return first_step
-
-        distance = abs(goal[0] - destination[0]) + abs(goal[1] - destination[1])
-        continuation = scheduler.plan_timed_path(
-            destination,
-            goal,
-            start_timestep=timestep + 1,
-            footprint=footprint,
-            blocked=permanent_blocked,
-            ignored_pallet_ids=docked_pallet_ids,
-            max_timestep=timestep + 1 + distance + PATH_SLACK,
-        )
-        if not continuation:
-            # A forced yield promises only this immediate, legal move. If the
-            # current reservations make the rest of the route unavailable, take
-            # the escape now and replan from the new state next timestep.
-            return first_step
-        return first_step[:-1] + continuation
-
-    def _plan_moves(
-        self,
-        intents: Dict[int, Intent],
-    ) -> Tuple[List[Action], Dict[int, List[TimedPosition]]]:
-        scheduler = Scheduler(self.world)
-        timestep = self.world.timestep
-        chosen: Dict[int, List[TimedPosition]] = {}
-        forced_first_moves: Dict[int, Position] = {}
-        actions: List[Action] = []
-
-        # Non-moving robots reserve their current rigid footprint for this step.
-        for robot_id in sorted(self.world.robots):
-            if intents[robot_id].move_goal is None:
-                position = self.world.robots[robot_id].position
-                scheduler.reservations.reserve_transition(
-                    timestep, position, position, self._footprint(robot_id)
-                )
-
-        for robot_id in sorted(self.world.robots):
-            goal = intents[robot_id].move_goal
-            state = self.states[robot_id]
-            if goal is None:
-                state.movement = None
-                continue
-
-            while True:
-                robot = self.world.robots[robot_id]
-                footprint = self._footprint(robot_id)
-                blocked = self._other_robot_cells(robot_id)
-                permanent_blocked = self._permanent_robot_cells(robot_id)
-                planning = self._planning_scheduler(
-                    scheduler,
-                    robot_id,
-                    forced_first_moves,
-                )
-                forced_destination = forced_first_moves.get(robot_id)
-
-                if forced_destination is not None:
-                    trajectory = self._plan_with_forced_first_move(
-                        robot_id,
-                        goal,
-                        planning,
-                        forced_destination,
-                    )
-                elif not forced_first_moves and self._cached_plan_usable(
-                    robot_id,
-                    goal,
-                    planning,
-                    blocked,
-                ):
-                    trajectory = list(state.movement.trajectory)
-                else:
-                    docked_pallet_ids = [
-                        pallet.pallet_id
-                        for pallet in self.world.pallets.values()
-                        if pallet.docked_to is not None
-                    ]
-                    distance = abs(goal[0] - robot.position[0]) + abs(
-                        goal[1] - robot.position[1]
-                    )
-                    trajectory = planning.plan_timed_path(
-                        robot.position,
-                        goal,
-                        start_timestep=timestep,
-                        footprint=footprint,
-                        blocked=permanent_blocked,
-                        ignored_pallet_ids=docked_pallet_ids,
-                        max_timestep=timestep + distance + PATH_SLACK,
-                    )
-
-                if not trajectory:
-                    if forced_destination is not None:
-                        raise RuntimeError(
-                            f"Robot {robot_id} could not execute forced yield move"
-                        )
-                    state.movement = None
-                    break
-
-                # Check the proposed priority trajectory before committing it.
-                # If it makes waiting illegal for a lower-priority mover, force
-                # that robot to take its best legal first move immediately. If
-                # no first move survives the proposal, preserve an escape from
-                # the pre-commit state and replan the higher-priority trajectory.
-                trial = self._scheduler_with_forced_moves(
-                    scheduler,
-                    forced_first_moves,
-                    exclude_robot_id=robot_id,
-                )
-                trial.reserve_timed_path(trajectory, footprint)
-
-                added_force = False
-                for lower_id in sorted(self.world.robots):
-                    if lower_id <= robot_id:
-                        continue
-                    if intents[lower_id].move_goal is None:
-                        continue
-                    if lower_id in forced_first_moves:
-                        continue
-
-                    can_wait, legal_moves = self._immediate_options(lower_id, trial)
-                    if can_wait:
-                        continue
-
-                    lower_goal = intents[lower_id].move_goal
-                    if legal_moves:
-                        escape_moves = legal_moves
-                        escape_scheduler = trial
-                    else:
-                        base = self._scheduler_with_forced_moves(
-                            scheduler,
-                            forced_first_moves,
-                            exclude_robot_id=lower_id,
-                        )
-                        _, escape_moves = self._immediate_options(lower_id, base)
-                        if not escape_moves:
-                            raise RuntimeError(
-                                f"Robot {lower_id} has no legal immediate yield move"
-                            )
-                        escape_scheduler = base
-
-                    def escape_key(position: Position) -> Tuple[int, int, int, int, int]:
-                        route = self._plan_with_forced_first_move(
-                            lower_id,
-                            lower_goal,
-                            escape_scheduler,
-                            position,
-                        )
-                        distance = abs(lower_goal[0] - position[0]) + abs(
-                            lower_goal[1] - position[1]
-                        )
-                        complete_route = position == lower_goal or len(route) > 2
-                        return (
-                            0 if complete_route else 1,
-                            len(route) if complete_route else distance + PATH_SLACK,
-                            distance,
-                            position[1],
-                            position[0],
-                        )
-
-                    escape = min(escape_moves, key=escape_key)
-                    forced_first_moves[lower_id] = escape
-                    added_force = True
-
-                if added_force:
-                    state.movement = None
-                    continue
-
-                state.movement = MovementPlan(goal, list(trajectory))
-                scheduler.reserve_timed_path(trajectory, footprint)
-                chosen[robot_id] = trajectory
-                if forced_destination is not None:
-                    del forced_first_moves[robot_id]
-                if len(trajectory) >= 2 and trajectory[1][1] != robot.position:
-                    actions.append(
-                        Action(timestep, robot_id, ActionType.MOVE, trajectory[1][1])
-                    )
-                break
-
-        return actions, chosen
+        return actions
 
     def _post_action(self, robot_id: int, intent: Intent) -> None:
         state = self.states[robot_id]
@@ -738,12 +522,10 @@ class MultiRobotSolver:
         elif intent.action == ActionType.DOCK:
             state.phase = TO_REFILL
             state.row_goal = None
-            state.movement = None
 
         elif intent.action == ActionType.UNDOCK:
             state.phase = COLLECT
             state.row_goal = None
-            state.movement = None
             state.refill_robot_home = None
             state.refill_pallet_home = None
 
@@ -756,21 +538,6 @@ class MultiRobotSolver:
             self.world.robots[robot_id].current_order = None
             self._release_pallet(robot_id)
             self.states[robot_id] = RobotState()
-
-    def _advance_movement_cache(
-        self,
-        chosen: Dict[int, List[TimedPosition]],
-    ) -> None:
-        for robot_id, trajectory in chosen.items():
-            state = self.states[robot_id]
-            if state.movement is None:
-                continue
-            remaining = list(trajectory[1:])
-            state.movement = (
-                MovementPlan(state.movement.goal, remaining)
-                if remaining
-                else None
-            )
 
     def solve(self) -> List[Action]:
         if not self.target_ids:
@@ -785,7 +552,7 @@ class MultiRobotSolver:
                 robot_id: self._intent(robot_id)
                 for robot_id in sorted(self.world.robots)
             }
-            move_actions, chosen = self._plan_moves(intents)
+            move_actions = self._plan_moves(intents)
 
             fixed_actions = [
                 Action(self.world.timestep, robot_id, intent.action, intent.target)
@@ -803,7 +570,6 @@ class MultiRobotSolver:
             for robot_id, intent in intents.items():
                 if intent.action is not None:
                     self._post_action(robot_id, intent)
-            self._advance_movement_cache(chosen)
 
         if len(self.queue):
             raise RuntimeError("Queue is nonempty after all tasks completed")
