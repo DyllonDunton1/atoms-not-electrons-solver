@@ -561,7 +561,7 @@ class MultiRobotSolver:
             max_timestep=timestep + 1 + distance + PATH_SLACK,
         )
         if not continuation:
-            # A forced yield promises only this immediate, legal move.  If the
+            # A forced yield promises only this immediate, legal move. If the
             # current reservations make the rest of the route unavailable, take
             # the escape now and replan from the new state next timestep.
             return first_step
@@ -673,6 +673,7 @@ class MultiRobotSolver:
                     lower_goal = intents[lower_id].move_goal
                     if legal_moves:
                         escape_moves = legal_moves
+                        escape_scheduler = trial
                     else:
                         base = self._scheduler_with_forced_moves(
                             scheduler,
@@ -684,16 +685,28 @@ class MultiRobotSolver:
                             raise RuntimeError(
                                 f"Robot {lower_id} has no legal immediate yield move"
                             )
+                        escape_scheduler = base
 
-                    escape = min(
-                        escape_moves,
-                        key=lambda position: (
-                            abs(lower_goal[0] - position[0])
-                            + abs(lower_goal[1] - position[1]),
+                    def escape_key(position: Position) -> Tuple[int, int, int, int, int]:
+                        route = self._plan_with_forced_first_move(
+                            lower_id,
+                            lower_goal,
+                            escape_scheduler,
+                            position,
+                        )
+                        distance = abs(lower_goal[0] - position[0]) + abs(
+                            lower_goal[1] - position[1]
+                        )
+                        complete_route = position == lower_goal or len(route) > 2
+                        return (
+                            0 if complete_route else 1,
+                            len(route) if complete_route else distance + PATH_SLACK,
+                            distance,
                             position[1],
                             position[0],
-                        ),
-                    )
+                        )
+
+                    escape = min(escape_moves, key=escape_key)
                     forced_first_moves[lower_id] = escape
                     added_force = True
 
