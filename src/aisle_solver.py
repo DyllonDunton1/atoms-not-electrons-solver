@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Optional, Set
+from typing import Dict, Iterable, Optional, Set, Tuple
 
 from .aisles import AislePlan, AislePlanner, AisleStop
 from .models import ActionType, Order
@@ -22,6 +22,9 @@ from .tasks import FulfillOrderTask, TaskStatus
 from .world import WorldState
 
 
+PERSISTENT_ADJACENCY_TIMESTEPS = 2
+
+
 @dataclass
 class AisleRobotState(RobotState):
     """Per-robot collection state for aisle-batched order execution."""
@@ -30,6 +33,8 @@ class AisleRobotState(RobotState):
     active_aisle_id: Optional[int] = None
     aisle_plan: Optional[AislePlan] = None
     aisle_stop_index: int = 0
+    deferred_pallet_ids: Set[int] = field(default_factory=set)
+    greedy_plan_timestep: Optional[int] = None
 
 
 class AisleAwareSolver(MultiRobotSolver):
@@ -54,6 +59,8 @@ class AisleAwareSolver(MultiRobotSolver):
             robot_id: AisleRobotState()
             for robot_id in world.robots
         }
+        self._priority_adjacency_streaks: Dict[Tuple[int, int], int] = {}
+        self._priority_adjacency_timestep: Optional[int] = None
 
     @staticmethod
     def _remaining_requirements(order: Order) -> Dict[int, int]:
@@ -103,39 +110,47 @@ class AisleAwareSolver(MultiRobotSolver):
                 congestion[other_state.active_aisle_id] += 1
         return dict(congestion)
 
-    def _priority_adjacent_pallet_ids(self, robot_id: int) -> Set[int]:
-        """Return unclaimed pallet choices temporarily yielded to higher priority.
+    def _refresh_priority_adjacency_streaks(self) -> None:
+        """Record consecutive timesteps that active robots remain beside pallets."""
+        if self._priority_adjacency_timestep == self.world.timestep:
+            return
 
-        When a robot is choosing or replanning future aisle stops, any undocked
-        pallet currently adjacent to an active lower-ID robot is treated as
-        temporarily unavailable. This breaks the warehouse-specific case where
-        two neighboring robots finish stops and immediately choose each other's
-        pallet positions. The rule is only a stop-selection preference; it does
-        not preempt an already-active stop or remove a pallet claim.
-        """
         pallet_by_position = {
             pallet.position: pallet.pallet_id
             for pallet in self.world.pallets.values()
             if pallet.docked_to is None
         }
-        unavailable: Set[int] = set()
+        current_pairs: Set[Tuple[int, int]] = set()
 
-        for higher_priority_id in self.active_robot_ids:
-            if higher_priority_id >= robot_id:
-                break
-            if self._robot_is_permanently_idle(higher_priority_id):
+        for robot_id in self.active_robot_ids:
+            if self._robot_is_permanently_idle(robot_id):
                 continue
-
-            higher_priority_position = self.world.robots[higher_priority_id].position
-            for adjacent in self.world.adjacent_positions(higher_priority_position):
+            position = self.world.robots[robot_id].position
+            for adjacent in self.world.adjacent_positions(position):
                 pallet_id = pallet_by_position.get(adjacent)
                 if pallet_id is not None:
-                    unavailable.add(pallet_id)
+                    current_pairs.add((robot_id, pallet_id))
 
-        return unavailable
+        self._priority_adjacency_streaks = {
+            pair: self._priority_adjacency_streaks.get(pair, 0) + 1
+            for pair in current_pairs
+        }
+        self._priority_adjacency_timestep = self.world.timestep
 
-    def _unavailable_pallet_ids(self, robot_id: int) -> Set[int]:
-        """Return pallet ids excluded from new aisle-stop selection right now."""
+    def _persistent_priority_blocked_pallet_ids(self, robot_id: int) -> Set[int]:
+        """Return pallets persistently occupied by active higher-priority robots."""
+        self._refresh_priority_adjacency_streaks()
+        return {
+            pallet_id
+            for (higher_priority_id, pallet_id), streak in (
+                self._priority_adjacency_streaks.items()
+            )
+            if higher_priority_id < robot_id
+            and streak >= PERSISTENT_ADJACENCY_TIMESTEPS
+        }
+
+    def _base_unavailable_pallet_ids(self, robot_id: int) -> Set[int]:
+        """Return claim/docking exclusions that apply to every pallet plan."""
         unavailable = {
             pallet_id
             for pallet_id, owner in self.pallet_claims.items()
@@ -146,17 +161,26 @@ class AisleAwareSolver(MultiRobotSolver):
             for pallet in self.world.pallets.values()
             if pallet.docked_to is not None and pallet.docked_to != robot_id
         )
+        return unavailable
 
-        priority_adjacent = self._priority_adjacent_pallet_ids(robot_id)
-        active_pallet_id = self.states[robot_id].pallet_id
-        if active_pallet_id is not None:
-            # A higher-priority robot merely passing the pallet must never kick
-            # this robot off an already-active stop.
-            priority_adjacent.discard(active_pallet_id)
-        unavailable.update(priority_adjacent)
+    def _persistent_blockers_in_active_aisle(self, robot_id: int) -> Set[int]:
+        state = self.states[robot_id]
+        aisle_id = state.active_aisle_id
+        if aisle_id is None:
+            return set()
+        aisle_pallet_ids = set(self.aisle_planner.layout.aisles[aisle_id].pallet_ids)
+        return self._persistent_priority_blocked_pallet_ids(robot_id) & aisle_pallet_ids
+
+    def _unavailable_pallet_ids(self, robot_id: int) -> Set[int]:
+        """Return exclusions for the current greedy in-aisle traversal."""
+        state = self.states[robot_id]
+        unavailable = self._base_unavailable_pallet_ids(robot_id)
+        unavailable.update(state.deferred_pallet_ids)
+        unavailable.update(self._persistent_blockers_in_active_aisle(robot_id))
         return unavailable
 
     def _select_new_aisle(self, robot_id: int) -> bool:
+        """Choose the best aisle without considering transient adjacency."""
         state = self.states[robot_id]
         robot = self.world.robots[robot_id]
 
@@ -164,7 +188,7 @@ class AisleAwareSolver(MultiRobotSolver):
             robot.position,
             state.remaining_by_sku,
             congestion_by_aisle=self._aisle_congestion(robot_id),
-            unavailable_pallet_ids=self._unavailable_pallet_ids(robot_id),
+            unavailable_pallet_ids=self._base_unavailable_pallet_ids(robot_id),
             blocked=self._permanent_robot_cells(robot_id),
         )
         if plan is None:
@@ -176,35 +200,46 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pallet_id = None
         state.pickup = None
         state.remaining = 0
+        state.deferred_pallet_ids.clear()
+        state.greedy_plan_timestep = None
         return True
 
     def _replan_active_aisle(self, robot_id: int) -> bool:
-        """Rebuild a stale plan from the robot's current position."""
+        """Rerun the greedy in-aisle plan from the robot's current position."""
         state = self.states[robot_id]
         if state.active_aisle_id is None:
             return self._select_new_aisle(robot_id)
+
+        # Persistent higher-priority occupancy checks a pallet off for this
+        # greedy pass. It stays deferred even if the blocker leaves a moment
+        # later; the final same-aisle rescan is the point where it may return.
+        state.deferred_pallet_ids.update(
+            self._persistent_blockers_in_active_aisle(robot_id)
+        )
 
         self._release_pallet(robot_id)
         state.pallet_id = None
         state.pickup = None
         state.remaining = 0
 
+        aisle_id = state.active_aisle_id
         plan = self.aisle_planner.plan_aisle(
-            state.active_aisle_id,
+            aisle_id,
             self.world.robots[robot_id].position,
             state.remaining_by_sku,
-            congestion=self._aisle_congestion(robot_id).get(
-                state.active_aisle_id,
-                0,
-            ),
+            congestion=self._aisle_congestion(robot_id).get(aisle_id, 0),
             unavailable_pallet_ids=self._unavailable_pallet_ids(robot_id),
             blocked=self._permanent_robot_cells(robot_id),
         )
+        state.greedy_plan_timestep = self.world.timestep
+
         if plan is None:
-            state.active_aisle_id = None
-            state.aisle_plan = None
-            state.aisle_stop_index = 0
-            return self._select_new_aisle(robot_id)
+            # No more candidates in this greedy pass. Give deferred pallets one
+            # live final rescan before the robot leaves this aisle.
+            if self._extend_active_aisle_if_useful(robot_id):
+                return True
+            self._finish_active_aisle(robot_id)
+            return False
 
         state.aisle_plan = plan
         state.aisle_stop_index = 0
@@ -213,10 +248,9 @@ class AisleAwareSolver(MultiRobotSolver):
     def _extend_active_aisle_if_useful(self, robot_id: int) -> bool:
         """Rescan the current aisle before leaving it.
 
-        A pallet that was busy when the original aisle plan was built may have
-        become available while this robot serviced other stops in the aisle.
-        We do not predict future releases or reserve a place in line; this is a
-        single live-availability replan from the robot's current position.
+        Deferred pallets are reconsidered here. Pallets that are still beside a
+        higher-priority robot for two or more consecutive timesteps remain
+        unavailable; ones whose blocker has left can re-enter the plan.
         """
         state = self.states[robot_id]
         aisle_id = state.active_aisle_id
@@ -229,12 +263,16 @@ class AisleAwareSolver(MultiRobotSolver):
         state.remaining = 0
         state.row_goal = None
 
+        live_persistent = self._persistent_blockers_in_active_aisle(robot_id)
+        unavailable = self._base_unavailable_pallet_ids(robot_id)
+        unavailable.update(live_persistent)
+
         plan = self.aisle_planner.plan_aisle(
             aisle_id,
             self.world.robots[robot_id].position,
             state.remaining_by_sku,
             congestion=self._aisle_congestion(robot_id).get(aisle_id, 0),
-            unavailable_pallet_ids=self._unavailable_pallet_ids(robot_id),
+            unavailable_pallet_ids=unavailable,
             blocked=self._permanent_robot_cells(robot_id),
         )
         if plan is None:
@@ -242,6 +280,8 @@ class AisleAwareSolver(MultiRobotSolver):
 
         state.aisle_plan = plan
         state.aisle_stop_index = 0
+        state.deferred_pallet_ids = set(live_persistent)
+        state.greedy_plan_timestep = self.world.timestep
         return True
 
     def _current_stop(self, robot_id: int) -> Optional[AisleStop]:
@@ -263,6 +303,8 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pickup = None
         state.remaining = 0
         state.row_goal = None
+        state.deferred_pallet_ids.clear()
+        state.greedy_plan_timestep = None
 
         if state.remaining_by_sku:
             state.phase = COLLECT
@@ -298,12 +340,10 @@ class AisleAwareSolver(MultiRobotSolver):
             self._advance_stop(robot_id)
             return False
 
-        # A stored future stop may have been planned before the local traffic
-        # changed. Recheck priority adjacency at activation time so a stale plan
-        # cannot send a lower-priority robot toward a pallet now occupied by a
-        # higher-priority neighbor. Active stops never reach this branch because
-        # they already have state.pallet_id set.
-        if stop.pallet_id in self._priority_adjacent_pallet_ids(robot_id):
+        # A plan can become stale within a timestep. Only persistent adjacency
+        # matters here; a one-timestep drive-by never rejects a stop.
+        if stop.pallet_id in self._persistent_priority_blocked_pallet_ids(robot_id):
+            state.deferred_pallet_ids.add(stop.pallet_id)
             return False
 
         pallet = self.world.pallets[stop.pallet_id]
@@ -348,6 +388,10 @@ class AisleAwareSolver(MultiRobotSolver):
         if robot_id not in self.active_robot_ids or state.task is None:
             return Intent()
 
+        # Refresh once per world timestep. Every robot then sees the same
+        # action-start adjacency streaks while producing its intent.
+        self._refresh_priority_adjacency_streaks()
+
         for _ in range(20):
             if state.phase == COLLECT:
                 if not state.remaining_by_sku:
@@ -366,6 +410,23 @@ class AisleAwareSolver(MultiRobotSolver):
                     continue
                 if state.remaining_by_sku.get(stop.sku, 0) <= 0:
                     self._advance_stop(robot_id)
+                    continue
+
+                # While moving from pallet to pallet, rerun the greedy aisle
+                # plan every timestep. Once the robot is physically at its
+                # pickup cell, servicing that pallet is protected from this
+                # transient availability rule.
+                traveling_between_stops = (
+                    state.pallet_id is None
+                    or state.pickup is None
+                    or robot.position != state.pickup
+                )
+                if (
+                    traveling_between_stops
+                    and state.greedy_plan_timestep != self.world.timestep
+                ):
+                    if not self._replan_active_aisle(robot_id):
+                        return Intent()
                     continue
 
                 if state.pallet_id is None:
