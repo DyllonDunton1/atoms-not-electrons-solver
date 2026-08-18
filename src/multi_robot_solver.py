@@ -625,7 +625,8 @@ class MultiRobotSolver:
                         if pallet.docked_to is not None
                     ]
                     distance = abs(goal[0] - robot.position[0]) + abs(
-                        goal[1] - robot.position[1])
+                        goal[1] - robot.position[1]
+                    )
                     trajectory = planning.plan_timed_path(
                         robot.position,
                         goal,
@@ -645,9 +646,10 @@ class MultiRobotSolver:
                     break
 
                 # Check the proposed priority trajectory before committing it.
-                # If it would leave a lower-priority moving robot with neither
-                # a legal wait nor any legal first move, preserve that robot's
-                # best currently legal escape and replan around it immediately.
+                # If it makes waiting illegal for a lower-priority mover, force
+                # that robot to take its best legal first move immediately. If
+                # no first move survives the proposal, preserve an escape from
+                # the pre-commit state and replan the higher-priority trajectory.
                 trial = self._scheduler_with_forced_moves(
                     scheduler,
                     forced_first_moves,
@@ -665,21 +667,24 @@ class MultiRobotSolver:
                         continue
 
                     can_wait, legal_moves = self._immediate_options(lower_id, trial)
-                    if can_wait or legal_moves:
+                    if can_wait:
                         continue
 
-                    base = self._scheduler_with_forced_moves(
-                        scheduler,
-                        forced_first_moves,
-                        exclude_robot_id=lower_id,
-                    )
-                    _, escape_moves = self._immediate_options(lower_id, base)
-                    if not escape_moves:
-                        raise RuntimeError(
-                            f"Robot {lower_id} has no legal immediate yield move"
-                        )
-
                     lower_goal = intents[lower_id].move_goal
+                    if legal_moves:
+                        escape_moves = legal_moves
+                    else:
+                        base = self._scheduler_with_forced_moves(
+                            scheduler,
+                            forced_first_moves,
+                            exclude_robot_id=lower_id,
+                        )
+                        _, escape_moves = self._immediate_options(lower_id, base)
+                        if not escape_moves:
+                            raise RuntimeError(
+                                f"Robot {lower_id} has no legal immediate yield move"
+                            )
+
                     escape = min(
                         escape_moves,
                         key=lambda position: (
