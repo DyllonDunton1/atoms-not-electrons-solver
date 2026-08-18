@@ -298,6 +298,14 @@ class AisleAwareSolver(MultiRobotSolver):
             self._advance_stop(robot_id)
             return False
 
+        # A stored future stop may have been planned before the local traffic
+        # changed. Recheck priority adjacency at activation time so a stale plan
+        # cannot send a lower-priority robot toward a pallet now occupied by a
+        # higher-priority neighbor. Active stops never reach this branch because
+        # they already have state.pallet_id set.
+        if stop.pallet_id in self._priority_adjacent_pallet_ids(robot_id):
+            return False
+
         pallet = self.world.pallets[stop.pallet_id]
         claim = self.pallet_claims.get(stop.pallet_id)
         if claim is not None and claim != robot_id:
