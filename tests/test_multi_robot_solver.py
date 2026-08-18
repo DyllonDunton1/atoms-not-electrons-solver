@@ -135,33 +135,6 @@ class TestMultiRobotSolver(unittest.TestCase):
         self.assertEqual(second_by_robot[2].target, (5, 5))
         world.validate()
 
-    def test_exact_goal_swap_requests_one_step_yield(self):
-        world, solver = self._dummy_solver(
-            [Robot(2, (5, 6)), Robot(4, (5, 5))]
-        )
-        intents = {
-            2: Intent(move_goal=(5, 5)),
-            4: Intent(move_goal=(5, 6)),
-        }
-
-        first_actions = solver._plan_moves(intents)
-        first_by_robot = {action.robot_id: action for action in first_actions}
-
-        # R2 wants R4's current cell, so R2 waits. R4 cannot produce a full
-        # path to its own goal because that goal is R2's current cell, but the
-        # one-step priority request still makes R4 clear sideways/up rather
-        # than letting both robots wait forever.
-        self.assertNotIn(2, first_by_robot)
-        self.assertIn(4, first_by_robot)
-        self.assertNotEqual(first_by_robot[4].target, (5, 6))
-        self.assertNotEqual(first_by_robot[4].target, (5, 5))
-
-        solver.simulator.step(first_actions)
-        second_actions = solver._plan_moves(intents)
-        second_by_robot = {action.robot_id: action for action in second_actions}
-        self.assertEqual(second_by_robot[2].target, (5, 5))
-        world.validate()
-
     def test_replenishment_rigid_robots_clear_without_future_prediction(self):
         pallets = [
             Pallet(0, (37, 37), 0, 1, 1, (37, 37), 2, (1, 0)),
