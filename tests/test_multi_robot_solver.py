@@ -242,7 +242,7 @@ class TestMultiRobotSolver(unittest.TestCase):
         self.assertTrue(actions)
 
     def test_five_robots_solve_first_ten_orders(self):
-        world, actions = self._run_prefix([0, 1], 10)
+        world, actions = self._run_prefix([0, 1, 2, 3, 4], 10)
 
         assigned_robots = {
             world.orders[order_id].assigned_robot
