@@ -1,10 +1,10 @@
-"""Integration tests for the concurrent FIFO baseline solver."""
+"""Integration and traffic tests for the concurrent FIFO solver."""
 
 from pathlib import Path
 import threading
 import unittest
 
-from src.models import ActionType, Order, Pallet, ProblemInstance, Robot
+from src.models import Action, ActionType, Order, Pallet, ProblemInstance, Robot
 from src.multi_robot_solver import Intent, MultiRobotSolver
 from src.parser import parse_problem
 from src.simulator import Simulator
@@ -79,8 +79,6 @@ class TestMultiRobotSolver(unittest.TestCase):
         self.assertEqual(len(action_keys), len(set(action_keys)))
         world.validate()
 
-        # Replay from a fresh parse so correctness does not depend only on the
-        # solver's in-place simulation while generating the schedule.
         replay_world = WorldState(parse_problem(BIG_ORDER_PATH))
         Simulator(replay_world).run(actions)
         self.assertTrue(all(replay_world.orders[i].fulfilled for i in order_ids))
@@ -91,169 +89,176 @@ class TestMultiRobotSolver(unittest.TestCase):
 
         return world, actions
 
-    def test_lower_priority_robot_yields_immediately(self):
+    @staticmethod
+    def _dummy_solver(robots, pallets=None, capacities=None):
         problem = ProblemInstance(
-            robots=[Robot(0, (5, 6)), Robot(1, (5, 5))],
-            sku_capacities=[],
-            pallets=[],
+            robots=robots,
+            sku_capacities=capacities or [],
+            pallets=pallets or [],
             orders=[Order(0, []), Order(1, [])],
         )
         world = WorldState(problem)
         solver = MultiRobotSolver(
             world,
-            robot_ids=[0, 1],
+            robot_ids=[robot.robot_id for robot in robots],
             order_ids=[0, 1],
-            max_timesteps=20,
+            max_timesteps=50,
         )
-        goals = {
-            0: (5, 4),
-            1: (5, 7),
-        }
+        return world, solver
 
-        def current_intents():
-            return {
-                robot_id: (
-                    Intent()
-                    if world.robots[robot_id].position == goal
-                    else Intent(move_goal=goal)
-                )
-                for robot_id, goal in goals.items()
-            }
-
-        intents = current_intents()
-        forced_calls = []
-        original_forced_plan = solver._plan_with_forced_first_move
-
-        def recording_forced_plan(robot_id, goal, scheduler, destination):
-            forced_calls.append((robot_id, destination))
-            return original_forced_plan(robot_id, goal, scheduler, destination)
-
-        solver._plan_with_forced_first_move = recording_forced_plan
-
-        first_actions, chosen = solver._plan_moves(intents)
-        first_by_robot = {action.robot_id: action for action in first_actions}
-
-        # Robot 0 has priority and must wait one timestep because robot 1
-        # occupies the next cell at action start. Robot 1 must yield immediately
-        # with a lateral detour rather than stepping farther into robot 0's
-        # future route or also waiting and recreating the deadlock.
-        self.assertNotIn(0, first_by_robot)
-        self.assertIn(1, first_by_robot)
-        self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
-        self.assertIn(first_by_robot[1].target, {(4, 5), (6, 5)})
-        self.assertIn((1, first_by_robot[1].target), forced_calls)
-
-        solver.simulator.step(first_actions)
-        solver._advance_movement_cache(chosen)
-
-        intents = current_intents()
-        second_actions, chosen = solver._plan_moves(intents)
-        second_by_robot = {action.robot_id: action for action in second_actions}
-        self.assertIn(0, second_by_robot)
-        self.assertEqual(second_by_robot[0].target, (5, 5))
-
-        solver.simulator.step(second_actions)
-        solver._advance_movement_cache(chosen)
-
-        for _ in range(8):
-            if all(
-                world.robots[robot_id].position == goal
-                for robot_id, goal in goals.items()
-            ):
-                break
-            intents = current_intents()
-            actions, chosen = solver._plan_moves(intents)
-            solver.simulator.step(actions)
-            solver._advance_movement_cache(chosen)
-
-        self.assertEqual(world.robots[0].position, goals[0])
-        self.assertEqual(world.robots[1].position, goals[1])
-
-    def test_docked_lower_priority_robot_keeps_immediate_escape(self):
-        # Mirrors the t=7461 long-run failure: robot 1 carries a pallet on its
-        # east side in a service lane. Up/down keep that pallet in occupied
-        # pallet cells and moving right puts the robot center on a pallet home,
-        # so moving left is its only legal immediate yield move.
-        pallets = [
-            Pallet(0, (17, 10), 0, 1, 1, (17, 10), 1, (1, 0)),
-            Pallet(1, (17, 9), 1, 1, 1, (17, 9)),
-            Pallet(2, (17, 11), 2, 1, 1, (17, 11)),
-            Pallet(3, (18, 10), 3, 1, 1, (18, 10)),
-        ]
-        problem = ProblemInstance(
-            robots=[
-                Robot(0, (16, 11)),
-                Robot(1, (16, 10), docked_pallets=[0]),
-            ],
-            sku_capacities=[1, 1, 1, 1],
-            pallets=pallets,
-            orders=[Order(0, []), Order(1, [])],
-        )
-        world = WorldState(problem)
-        solver = MultiRobotSolver(
-            world,
-            robot_ids=[0, 1],
-            order_ids=[0, 1],
-            max_timesteps=20,
+    def test_lower_id_waits_while_higher_id_detours(self):
+        world, solver = self._dummy_solver(
+            [Robot(2, (5, 6)), Robot(4, (5, 5))]
         )
         intents = {
-            0: Intent(move_goal=(16, 9)),
-            1: Intent(move_goal=(16, 39)),
+            2: Intent(move_goal=(5, 4)),
+            4: Intent(move_goal=(5, 7)),
         }
 
-        first_actions, chosen = solver._plan_moves(intents)
+        preferred = solver._preferred_path(2, (5, 4), {})
+        self.assertEqual(preferred[:3], [(5, 6), (5, 5), (5, 4)])
+
+        first_actions = solver._plan_moves(intents)
         first_by_robot = {action.robot_id: action for action in first_actions}
 
-        self.assertIn(1, first_by_robot)
-        self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
-        self.assertEqual(first_by_robot[1].target, (15, 10))
+        # R2 does not reroute around higher-ID R4. Its desired next cell is
+        # physically occupied, so it waits. R4 sees lower-ID R2 as a static
+        # obstacle and immediately starts a spatial detour.
+        self.assertNotIn(2, first_by_robot)
+        self.assertIn(4, first_by_robot)
+        self.assertIn(first_by_robot[4].target, {(4, 5), (6, 5)})
 
-        # The rigid footprint move itself must be simulator-legal: robot 1
-        # shifts left and its docked pallet occupies robot 1's old center cell.
         solver.simulator.step(first_actions)
-        solver._advance_movement_cache(chosen)
-        self.assertEqual(world.robots[1].position, (15, 10))
-        self.assertEqual(world.pallets[0].position, (16, 10))
+        second_actions = solver._plan_moves(intents)
+        second_by_robot = {action.robot_id: action for action in second_actions}
+        self.assertIn(2, second_by_robot)
+        self.assertEqual(second_by_robot[2].target, (5, 5))
         world.validate()
 
-    def test_forced_yield_does_not_require_full_continuation(self):
-        problem = ProblemInstance(
-            robots=[Robot(0, (5, 5))],
-            sku_capacities=[],
-            pallets=[],
-            orders=[Order(0, [])],
+    def test_replenishment_rigid_robots_clear_without_future_prediction(self):
+        pallets = [
+            Pallet(0, (37, 37), 0, 1, 1, (37, 37), 2, (1, 0)),
+            Pallet(1, (37, 39), 0, 1, 1, (37, 39), 4, (1, 0)),
+        ]
+        world, solver = self._dummy_solver(
+            [
+                Robot(2, (36, 37), docked_pallets=[0]),
+                Robot(4, (36, 39), docked_pallets=[1]),
+            ],
+            pallets=pallets,
+            capacities=[1],
         )
-        world = WorldState(problem)
-        solver = MultiRobotSolver(
-            world,
-            robot_ids=[0],
-            order_ids=[0],
-            max_timesteps=20,
+        intents = {
+            2: Intent(move_goal=(36, 39)),
+            4: Intent(move_goal=(36, 35)),
+        }
+
+        first_actions = solver._plan_moves(intents)
+        first_by_robot = {action.robot_id: action for action in first_actions}
+        self.assertEqual(first_by_robot[2].target, (36, 38))
+        self.assertEqual(first_by_robot[4].target, (35, 39))
+        solver.simulator.step(first_actions)
+
+        second_actions = solver._plan_moves(intents)
+        second_by_robot = {action.robot_id: action for action in second_actions}
+        self.assertNotIn(2, second_by_robot)
+        self.assertEqual(second_by_robot[4].target, (34, 39))
+        solver.simulator.step(second_actions)
+
+        third_actions = solver._plan_moves(intents)
+        third_by_robot = {action.robot_id: action for action in third_actions}
+        self.assertEqual(third_by_robot[2].target, (36, 39))
+
+        solver.simulator.step(third_actions)
+        self.assertEqual(world.robots[2].position, (36, 39))
+        world.validate()
+
+    def test_south_docked_higher_robot_does_not_distort_lower_route(self):
+        wall = [
+            Pallet(pallet_id, (pallet_id, 4), 0, 1, 1, (pallet_id, 4))
+            for pallet_id in range(10)
+        ]
+        docked = [
+            Pallet(20, (3, 6), 0, 1, 1, (3, 6), 2, (0, 1)),
+            Pallet(21, (5, 6), 0, 1, 1, (5, 6), 4, (0, 1)),
+        ]
+        world, solver = self._dummy_solver(
+            [
+                Robot(2, (3, 5), docked_pallets=[20]),
+                Robot(4, (5, 5), docked_pallets=[21]),
+            ],
+            pallets=wall + docked,
+            capacities=[1],
         )
 
-        class FirstStepOnlyScheduler:
-            def __init__(self):
-                self.calls = 0
-
-            def plan_timed_path(self, *args, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    return [(0, (5, 5)), (1, (4, 5))]
-                return []
-
-        scheduler = FirstStepOnlyScheduler()
-        trajectory = solver._plan_with_forced_first_move(
-            0,
-            (10, 5),
-            scheduler,
-            (4, 5),
+        # R2's preferred route goes straight through the complete higher-ID R4
+        # assembly, including R4's south-docked pallet. Priority affects route
+        # choice, not physical execution legality.
+        lower_path = solver._preferred_path(2, (7, 5), {})
+        self.assertEqual(
+            lower_path[:5],
+            [(3, 5), (4, 5), (5, 5), (6, 5), (7, 5)],
         )
 
-        # The forced yield is a one-timestep commitment, not a promise that the
-        # robot can already see its complete route after yielding. It must move
-        # now and let normal planning continue from the new state next timestep.
-        self.assertEqual(trajectory, [(0, (5, 5)), (1, (4, 5))])
-        self.assertEqual(scheduler.calls, 2)
+        # Once R2 has committed its first step, R4 must plan around both R2's
+        # current and destination rigid footprints. The pallet wall removes the
+        # upper escape, so the first legal detour is to the right.
+        higher_path = solver._preferred_path(4, (1, 5), {2: (4, 5)})
+        self.assertTrue(higher_path)
+        self.assertEqual(higher_path[1], (6, 5))
+
+        actions = solver._plan_moves(
+            {
+                2: Intent(move_goal=(7, 5)),
+                4: Intent(move_goal=(1, 5)),
+            }
+        )
+        by_robot = {action.robot_id: action for action in actions}
+        self.assertEqual(by_robot[2].target, (4, 5))
+        self.assertEqual(by_robot[4].target, (6, 5))
+        solver.simulator.step(actions)
+        world.validate()
+
+    def test_lower_id_waits_while_higher_id_is_picking(self):
+        pallet = Pallet(0, (5, 4), 0, 3, 3, (5, 4))
+        world, solver = self._dummy_solver(
+            [Robot(2, (4, 5)), Robot(4, (5, 5))],
+            pallets=[pallet],
+            capacities=[3],
+        )
+
+        for _ in range(3):
+            intents = {
+                2: Intent(move_goal=(7, 5)),
+                4: Intent(ActionType.PICK, (5, 4)),
+            }
+            move_actions = solver._plan_moves(intents)
+            self.assertNotIn(2, {action.robot_id for action in move_actions})
+            fixed_pick = Action(
+                world.timestep,
+                4,
+                ActionType.PICK,
+                (5, 4),
+            )
+            solver.simulator.step(move_actions + [fixed_pick])
+            self.assertEqual(world.robots[2].position, (4, 5))
+
+        # Once R4 is allowed to move, it clears around lower-ID R2. R2 still
+        # waits for that physical timestep, then takes the newly vacated cell.
+        moving_intents = {
+            2: Intent(move_goal=(7, 5)),
+            4: Intent(move_goal=(5, 7)),
+        }
+        clear_actions = solver._plan_moves(moving_intents)
+        clear_by_robot = {action.robot_id: action for action in clear_actions}
+        self.assertNotIn(2, clear_by_robot)
+        self.assertIn(4, clear_by_robot)
+        solver.simulator.step(clear_actions)
+
+        next_actions = solver._plan_moves(moving_intents)
+        next_by_robot = {action.robot_id: action for action in next_actions}
+        self.assertEqual(next_by_robot[2].target, (5, 5))
+        world.validate()
 
     def test_two_robots_solve_first_ten_orders(self):
         world, actions = self._run_prefix([0, 1], 10)
