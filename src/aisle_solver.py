@@ -1,4 +1,4 @@
-"""Aisle-aware five-robot solver that preserves the known-valid FIFO baseline."""
+"""Aisle-aware five-robot solver built on the FIFO fleet baseline."""
 
 from __future__ import annotations
 
@@ -136,7 +136,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pallet_id = None
         state.pickup = None
         state.remaining = 0
-        state.movement = None
         return True
 
     def _replan_active_aisle(self, robot_id: int) -> bool:
@@ -149,7 +148,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pallet_id = None
         state.pickup = None
         state.remaining = 0
-        state.movement = None
 
         plan = self.aisle_planner.plan_aisle(
             state.active_aisle_id,
@@ -190,7 +188,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pickup = None
         state.remaining = 0
         state.row_goal = None
-        state.movement = None
 
         plan = self.aisle_planner.plan_aisle(
             aisle_id,
@@ -226,7 +223,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pickup = None
         state.remaining = 0
         state.row_goal = None
-        state.movement = None
 
         if state.remaining_by_sku:
             state.phase = COLLECT
@@ -240,7 +236,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pickup = None
         state.remaining = 0
         state.row_goal = None
-        state.movement = None
         state.aisle_stop_index += 1
 
         if (
@@ -281,7 +276,6 @@ class AisleAwareSolver(MultiRobotSolver):
         state.pallet_id = stop.pallet_id
         state.pickup = stop.pickup
         state.remaining = quantity
-        state.movement = None
         return True
 
     def _current_stop_is_still_valid(self, robot_id: int) -> bool:
@@ -361,7 +355,6 @@ class AisleAwareSolver(MultiRobotSolver):
                         continue
                     state.refill_robot_home = robot.position
                     state.refill_pallet_home = pallet.position
-                    state.movement = None
                     return Intent(ActionType.DOCK, pallet.position)
 
                 return Intent(ActionType.PICK, pallet.position)
@@ -370,7 +363,6 @@ class AisleAwareSolver(MultiRobotSolver):
                 if robot.position[1] == self.world.replenishment_y:
                     state.phase = RETURN_REFILL
                     state.row_goal = None
-                    state.movement = None
                     continue
 
                 footprint = self._footprint(robot_id)
@@ -380,7 +372,6 @@ class AisleAwareSolver(MultiRobotSolver):
                     footprint,
                 ):
                     state.row_goal = None
-                    state.movement = None
 
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
@@ -419,7 +410,6 @@ class AisleAwareSolver(MultiRobotSolver):
                     SINGLE_ROBOT_FOOTPRINT,
                 ):
                     state.row_goal = None
-                    state.movement = None
 
                 if state.row_goal is None:
                     state.row_goal = self._best_row_goal(
@@ -462,14 +452,12 @@ class AisleAwareSolver(MultiRobotSolver):
         elif intent.action == ActionType.DOCK:
             state.phase = TO_REFILL
             state.row_goal = None
-            state.movement = None
 
         elif intent.action == ActionType.UNDOCK:
             # Refill is a subroutine of the current aisle. Keep the aisle
             # commitment and current stop intact while returning to collect.
             state.phase = COLLECT
             state.row_goal = None
-            state.movement = None
             state.refill_robot_home = None
             state.refill_pallet_home = None
 
