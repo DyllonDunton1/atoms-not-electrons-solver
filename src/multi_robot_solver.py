@@ -452,102 +452,19 @@ class MultiRobotSolver:
         destination_cells = self._footprint_cells_at(robot_id, destination)
         return not bool(destination_cells & self._other_robot_cells(robot_id))
 
-    def _blocking_higher_robot_ids(
-        self,
-        robot_id: int,
-        destination: Position,
-    ) -> Set[int]:
-        """Return active higher-ID robots occupying a desired first-step footprint."""
-        desired_cells = self._footprint_cells_at(robot_id, destination)
-        blockers: Set[int] = set()
-        for other_id in self.world.robots:
-            if other_id <= robot_id or self._robot_is_permanently_idle(other_id):
-                continue
-            if desired_cells & self._footprint_cells(other_id):
-                blockers.add(other_id)
-        return blockers
-
-    def _yield_destination(
-        self,
-        robot_id: int,
-        goal: Position,
-        requested_cells: Set[Position],
-        preferred_next: Optional[Position],
-        committed_destinations: Dict[int, Position],
-        reservations: ReservationTable,
-    ) -> Optional[Position]:
-        """Choose one legal step that clears a lower-ID robot's requested cells.
-
-        This is deliberately one-step and local. It does not reserve or predict
-        a future escape route. If a lower-ID robot is physically waiting on this
-        robot, the higher-ID robot first tries to reduce its overlap with the
-        requested destination footprint, then everyone replans next timestep.
-        """
-        robot = self.world.robots[robot_id]
-        start = robot.position
-        footprint = self._footprint(robot_id)
-        current_overlap = len(self._footprint_cells(robot_id) & requested_cells)
-        if current_overlap == 0:
-            return None
-
-        blocked = self._priority_blocked_cells(robot_id, committed_destinations)
-        ignored_pallet_ids = self._ignored_docked_pallet_ids_for_path(robot_id)
-        candidates = []
-
-        for destination in self.world.adjacent_positions(start):
-            destination_cells = self._footprint_cells_at(robot_id, destination)
-            overlap = len(destination_cells & requested_cells)
-            if overlap >= current_overlap:
-                continue
-
-            step_path = self.spatial.find_path(
-                start,
-                destination,
-                footprint=footprint,
-                blocked=blocked,
-                ignored_pallet_ids=ignored_pallet_ids,
-            )
-            if len(step_path) != 2:
-                continue
-            if not self._first_step_is_physically_free(robot_id, destination):
-                continue
-            if not reservations.transition_is_free(
-                self.world.timestep,
-                start,
-                destination,
-                footprint,
-            ):
-                continue
-
-            candidates.append(
-                (
-                    overlap,
-                    0 if destination == preferred_next else 1,
-                    abs(goal[0] - destination[0]) + abs(goal[1] - destination[1]),
-                    destination[1],
-                    destination[0],
-                    destination,
-                )
-            )
-
-        if not candidates:
-            return None
-        return min(candidates)[-1]
-
     def _plan_moves(self, intents: Dict[int, Intent]) -> List[Action]:
         """Choose at most one safe move per robot using deterministic ID priority.
 
         Each robot recomputes a full spatial route from the current world state.
         Only the first step is considered for execution. Lower-ID robots choose
         first; higher-ID robots treat those committed transitions as obstacles.
-        If a lower-ID robot's preferred first step is physically occupied, it
-        waits and asks the blocking higher-ID robot to clear that footprint with
-        a single legal step. No future robot trajectory is predicted or cached.
+        If a preferred first step is occupied by higher-ID traffic, the robot
+        waits rather than rerouting around a robot that is responsible for
+        clearing the way.
         """
         timestep = self.world.timestep
         reservations = ReservationTable()
         committed_destinations: Dict[int, Position] = {}
-        yield_requests: Dict[int, Set[Position]] = {}
         actions: List[Action] = []
 
         for robot_id in sorted(self.world.robots):
@@ -557,8 +474,6 @@ class MultiRobotSolver:
             destination = start
             goal = intents[robot_id].move_goal
 
-            path: List[Position] = []
-            preferred_next: Optional[Position] = None
             if goal is not None:
                 path = self._preferred_path(
                     robot_id,
@@ -566,58 +481,25 @@ class MultiRobotSolver:
                     committed_destinations,
                 )
                 if len(path) >= 2:
-                    preferred_next = path[1]
-
-                requested_cells = yield_requests.get(robot_id, set())
-                if requested_cells:
-                    yielded = self._yield_destination(
-                        robot_id,
-                        goal,
-                        requested_cells,
-                        preferred_next,
-                        committed_destinations,
-                        reservations,
-                    )
-                    if yielded is not None:
-                        destination = yielded
+                    candidate = path[1]
+                    if (
+                        self._first_step_is_physically_free(robot_id, candidate)
+                        and reservations.transition_is_free(
+                            timestep,
+                            start,
+                            candidate,
+                            footprint,
+                        )
+                    ):
+                        destination = candidate
                         actions.append(
                             Action(
                                 timestep,
                                 robot_id,
                                 ActionType.MOVE,
-                                yielded,
+                                candidate,
                             )
                         )
-
-                if destination == start and preferred_next is not None:
-                    if self._first_step_is_physically_free(robot_id, preferred_next):
-                        if reservations.transition_is_free(
-                            timestep,
-                            start,
-                            preferred_next,
-                            footprint,
-                        ):
-                            destination = preferred_next
-                            actions.append(
-                                Action(
-                                    timestep,
-                                    robot_id,
-                                    ActionType.MOVE,
-                                    preferred_next,
-                                )
-                            )
-                    else:
-                        desired_cells = self._footprint_cells_at(
-                            robot_id,
-                            preferred_next,
-                        )
-                        for blocker_id in self._blocking_higher_robot_ids(
-                            robot_id,
-                            preferred_next,
-                        ):
-                            yield_requests.setdefault(blocker_id, set()).update(
-                                desired_cells
-                            )
 
             reservations.reserve_transition(
                 timestep,
