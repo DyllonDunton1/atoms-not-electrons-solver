@@ -80,18 +80,87 @@ def solve_with_progress(solver: AisleAwareSolver, label: str, stop_timestep=None
 
 
 def print_snapshot(solver: AisleAwareSolver) -> None:
+    """Print a read-only diagnostic snapshot without invoking replanning logic."""
     print(f"Snapshot at t={solver.world.timestep}:")
+    print(f"  pallet_claims={dict(sorted(solver.pallet_claims.items()))}")
+
     for robot_id in solver.active_robot_ids:
         robot = solver.world.robots[robot_id]
         state = solver.states[robot_id]
         order_id = state.task.order_id if state.task is not None else None
-        movement_goal = state.movement.goal if state.movement is not None else None
+        footprint = sorted(solver._footprint_cells(robot_id))
+        current_stop = solver._current_stop(robot_id)
+
+        if current_stop is None:
+            stop_description = None
+        else:
+            stop_description = (
+                f"sku={current_stop.sku} qty={current_stop.quantity} "
+                f"pallet={current_stop.pallet_id} pickup={current_stop.pickup}"
+            )
+
+        current_pallet = None
+        if state.pallet_id is not None:
+            pallet = solver.world.pallets[state.pallet_id]
+            current_pallet = (
+                f"id={pallet.pallet_id} pos={pallet.position} sku={pallet.sku} "
+                f"stock={pallet.count}/{pallet.max_count} "
+                f"docked_to={pallet.docked_to}"
+            )
+
+        adjacent_pallets = []
+        for pallet in solver.world.pallets.values():
+            distance = (
+                abs(robot.position[0] - pallet.position[0])
+                + abs(robot.position[1] - pallet.position[1])
+            )
+            if distance == 1:
+                adjacent_pallets.append(
+                    (
+                        pallet.pallet_id,
+                        pallet.position,
+                        pallet.sku,
+                        pallet.count,
+                        pallet.docked_to,
+                        solver.pallet_claims.get(pallet.pallet_id),
+                    )
+                )
+        adjacent_pallets.sort()
+
+        nearby_robots = {
+            other_id: solver.world.robots[other_id].position
+            for other_id in solver.active_robot_ids
+            if other_id != robot_id
+            and (
+                abs(robot.position[0] - solver.world.robots[other_id].position[0])
+                + abs(robot.position[1] - solver.world.robots[other_id].position[1])
+                <= 3
+            )
+        }
+
         print(
-            f"  robot {robot_id}: pos={robot.position} order={order_id} "
-            f"phase={state.phase} aisle={state.active_aisle_id} "
-            f"stop={state.aisle_stop_index} pallet={state.pallet_id} "
-            f"pickup={state.pickup} row_goal={state.row_goal} "
-            f"move_goal={movement_goal}"
+            f"  robot {robot_id}: pos={robot.position} footprint={footprint} "
+            f"docked={list(robot.docked_pallets)}"
+        )
+        print(
+            f"    order={order_id} phase={state.phase} "
+            f"aisle={state.active_aisle_id} stop_index={state.aisle_stop_index}"
+        )
+        print(
+            f"    current_stop={stop_description} current_pallet={current_pallet}"
+        )
+        print(
+            f"    pickup={state.pickup} row_goal={state.row_goal} "
+            f"refill_robot_home={state.refill_robot_home} "
+            f"refill_pallet_home={state.refill_pallet_home}"
+        )
+        print(
+            f"    remaining={state.remaining} "
+            f"remaining_by_sku={dict(sorted(state.remaining_by_sku.items()))}"
+        )
+        print(
+            f"    adjacent_pallets={adjacent_pallets} "
+            f"nearby_robots={nearby_robots}"
         )
 
 
