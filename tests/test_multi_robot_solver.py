@@ -110,6 +110,15 @@ class TestMultiRobotSolver(unittest.TestCase):
             1: Intent(move_goal=(5, 7)),
         }
 
+        forced_calls = []
+        original_forced_plan = solver._plan_with_forced_first_move
+
+        def recording_forced_plan(robot_id, goal, scheduler, destination):
+            forced_calls.append((robot_id, destination))
+            return original_forced_plan(robot_id, goal, scheduler, destination)
+
+        solver._plan_with_forced_first_move = recording_forced_plan
+
         first_actions, chosen = solver._plan_moves(intents)
         first_by_robot = {action.robot_id: action for action in first_actions}
 
@@ -120,6 +129,7 @@ class TestMultiRobotSolver(unittest.TestCase):
         self.assertIn(1, first_by_robot)
         self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
         self.assertNotEqual(first_by_robot[1].target, (5, 6))
+        self.assertIn((1, first_by_robot[1].target), forced_calls)
 
         solver.simulator.step(first_actions)
         solver._advance_movement_cache(chosen)
