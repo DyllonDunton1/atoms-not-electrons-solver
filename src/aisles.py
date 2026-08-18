@@ -192,13 +192,17 @@ class AislePlanner:
         congestion_by_aisle: Mapping[int, int],
         unavailable_pallet_ids: Iterable[int] = (),
         blocked: Iterable[Position] = (),
+        excluded_aisle_ids: Iterable[int] = (),
     ) -> Optional[AislePlan]:
-        """Shortlist all aisles cheaply, then fully plan the best three."""
+        """Shortlist all non-excluded aisles cheaply, then fully plan the best three."""
         unavailable = set(unavailable_pallet_ids)
         blocked_set = set(blocked)
+        excluded = set(excluded_aisle_ids)
         cheap_candidates: List[Tuple[float, int]] = []
 
         for aisle in self.layout.aisles:
+            if aisle.aisle_id in excluded:
+                continue
             options_by_sku = self._options_by_sku(
                 aisle,
                 remaining_by_sku,
