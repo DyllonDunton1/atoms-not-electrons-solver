@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 from src.aisle_solver import AisleAwareSolver
-from src.models import ActionType, Order, Pallet, ProblemInstance, Robot
+from src.models import Action, ActionType, Order, Pallet, ProblemInstance, Robot
 from src.multi_robot_solver import Intent
 from src.parser import parse_problem
 from src.simulator import Simulator
@@ -49,6 +49,136 @@ class TestAisleAwareSolver(unittest.TestCase):
     def test_five_robots_solve_first_ten_orders(self):
         actions = self._run_prefix([0, 1, 2, 3, 4], 10)
         self.assertTrue(actions)
+
+    def test_lower_priority_robot_skips_pallet_beside_higher_priority_robot(self):
+        # Both robots have just finished neighboring stops:
+        #
+        #     P2  P4  Pnext
+        #     R2  R4
+        #
+        # R2 wants P4. R4 wants P2 plus Pnext. R2 keeps P4 as its target even
+        # though R4 is standing at the pickup cell. R4 sees higher-priority R2
+        # beside P2, temporarily skips P2, and moves on to Pnext instead.
+        pallets = [
+            Pallet(0, (5, 4), 0, 1, 1, (5, 4)),
+            Pallet(1, (6, 4), 1, 1, 1, (6, 4)),
+            Pallet(2, (7, 4), 2, 1, 1, (7, 4)),
+        ]
+        problem = ProblemInstance(
+            robots=[Robot(2, (5, 5)), Robot(4, (6, 5))],
+            sku_capacities=[1, 1, 1],
+            pallets=pallets,
+            orders=[Order(0, [1]), Order(1, [0, 2])],
+        )
+        world = WorldState(problem)
+        solver = AisleAwareSolver(
+            world,
+            robot_ids=[2, 4],
+            order_ids=[0, 1],
+            max_timesteps=100,
+        )
+        solver._assign_free_robots()
+
+        self.assertTrue(solver._select_new_aisle(2))
+        self.assertTrue(solver._activate_current_stop(2))
+        self.assertEqual(solver.states[2].pallet_id, 1)
+        self.assertEqual(solver.states[2].pickup, (6, 5))
+
+        self.assertIn(0, solver._priority_adjacent_pallet_ids(4))
+        self.assertTrue(solver._select_new_aisle(4))
+        self.assertTrue(solver._activate_current_stop(4))
+        self.assertEqual(solver.states[4].pallet_id, 2)
+        self.assertNotEqual(solver.states[4].pallet_id, 0)
+
+        first_intents = {
+            2: solver._intent(2),
+            4: solver._intent(4),
+        }
+        self.assertEqual(first_intents[2].move_goal, (6, 5))
+        self.assertEqual(first_intents[4].move_goal, (7, 5))
+
+        first_moves = solver._plan_moves(first_intents)
+        first_by_robot = {action.robot_id: action for action in first_moves}
+        self.assertNotIn(2, first_by_robot)
+        self.assertEqual(first_by_robot[4].target, (7, 5))
+        solver.simulator.step(first_moves)
+
+        # R4 has now cleared R2's desired pickup cell. On the next timestep R2
+        # enters it while R4 picks Pnext.
+        second_intents = {
+            2: solver._intent(2),
+            4: solver._intent(4),
+        }
+        self.assertEqual(second_intents[4].action, ActionType.PICK)
+        self.assertEqual(second_intents[4].target, (7, 4))
+
+        second_moves = solver._plan_moves(second_intents)
+        second_by_robot = {action.robot_id: action for action in second_moves}
+        self.assertEqual(second_by_robot[2].target, (6, 5))
+
+        second_fixed = [
+            Action(world.timestep, 4, ActionType.PICK, (7, 4)),
+        ]
+        solver.simulator.step(second_moves + second_fixed)
+        solver._post_action(4, second_intents[4])
+
+        # The final same-aisle rescan now sees that R2 moved away from P2, so
+        # R4 can come back for the previously skipped requirement.
+        state4 = solver.states[4]
+        self.assertIsNotNone(state4.aisle_plan)
+        self.assertEqual(state4.aisle_stop_index, 0)
+        self.assertEqual(state4.aisle_plan.stops[0].pallet_id, 0)
+        self.assertEqual(state4.remaining_by_sku, {0: 1})
+        world.validate()
+
+    def test_higher_priority_robot_passing_does_not_preempt_active_pick(self):
+        pallet = Pallet(0, (6, 4), 1, 3, 3, (6, 4))
+        other = Pallet(1, (10, 10), 0, 1, 1, (10, 10))
+        problem = ProblemInstance(
+            robots=[Robot(2, (5, 3)), Robot(4, (6, 5))],
+            sku_capacities=[1, 3],
+            pallets=[pallet, other],
+            orders=[Order(0, [0]), Order(1, [1, 1])],
+        )
+        world = WorldState(problem)
+        solver = AisleAwareSolver(
+            world,
+            robot_ids=[2, 4],
+            order_ids=[0, 1],
+            max_timesteps=100,
+        )
+        solver._assign_free_robots()
+
+        self.assertTrue(solver._select_new_aisle(4))
+        self.assertTrue(solver._activate_current_stop(4))
+        self.assertEqual(solver.states[4].pallet_id, 0)
+        self.assertEqual(solver.states[4].pickup, (6, 5))
+        self.assertEqual(solver.pallet_claims[0], 4)
+
+        first_pick = solver._intent(4)
+        self.assertEqual(first_pick.action, ActionType.PICK)
+        self.assertEqual(first_pick.target, (6, 4))
+
+        # R2 drives onto the opposite side of P4 while R4 is actively picking.
+        # The adjacency rule is only for choosing future stops, so this must not
+        # revoke R4's active claim or force it to replan away from P4.
+        solver.simulator.step(
+            [
+                Action(world.timestep, 2, ActionType.MOVE, (6, 3)),
+                Action(world.timestep, 4, ActionType.PICK, (6, 4)),
+            ]
+        )
+        solver._post_action(4, first_pick)
+
+        self.assertIn(0, solver._priority_adjacent_pallet_ids(4))
+        self.assertNotIn(0, solver._unavailable_pallet_ids(4))
+        self.assertEqual(solver.pallet_claims[0], 4)
+        self.assertEqual(solver.states[4].pallet_id, 0)
+
+        next_pick = solver._intent(4)
+        self.assertEqual(next_pick.action, ActionType.PICK)
+        self.assertEqual(next_pick.target, (6, 4))
+        world.validate()
 
     def test_final_aisle_rescan_adds_newly_released_pallet(self):
         pallets = [
