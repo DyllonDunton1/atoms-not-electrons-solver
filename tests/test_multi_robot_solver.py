@@ -135,11 +135,12 @@ class TestMultiRobotSolver(unittest.TestCase):
 
         # Robot 0 has priority and must wait one timestep because robot 1
         # occupies the next cell at action start. Robot 1 must yield immediately
-        # rather than also waiting and creating a repeated optimistic deadlock.
+        # with a lateral detour rather than stepping farther into robot 0's
+        # future route or also waiting and recreating the deadlock.
         self.assertNotIn(0, first_by_robot)
         self.assertIn(1, first_by_robot)
         self.assertEqual(first_by_robot[1].action, ActionType.MOVE)
-        self.assertNotEqual(first_by_robot[1].target, (5, 6))
+        self.assertIn(first_by_robot[1].target, {(4, 5), (6, 5)})
         self.assertIn((1, first_by_robot[1].target), forced_calls)
 
         solver.simulator.step(first_actions)
