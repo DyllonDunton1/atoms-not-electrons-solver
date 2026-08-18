@@ -50,22 +50,23 @@ class TestAisleAwareSolver(unittest.TestCase):
         actions = self._run_prefix([0, 1, 2, 3, 4], 10)
         self.assertTrue(actions)
 
-    def test_lower_priority_robot_skips_pallet_beside_higher_priority_robot(self):
+    def test_persistent_priority_blocker_replans_traveling_robot(self):
         # The local aisle is:
         #
         #     P2  P4  Pnext
         #         R4
         #
-        # R4 initially plans P2 -> Pnext. Then R2 arrives beneath P2 and wants
-        # P4. R4 must recheck the stored future P2 stop, see higher-priority R2
-        # beside it, skip P2 for now, and move to Pnext. That clears P4 for R2.
+        # R4 claims P2 before R2 arrives. One timestep of R2 standing beside
+        # P2 is treated as a drive-by and R4 keeps its target. On the second
+        # consecutive timestep, P2 is deferred for this greedy pass and R4
+        # immediately replans to Pnext while it is still traveling.
         pallets = [
             Pallet(0, (5, 4), 0, 1, 1, (5, 4)),
             Pallet(1, (6, 4), 1, 1, 1, (6, 4)),
             Pallet(2, (7, 4), 2, 1, 1, (7, 4)),
         ]
         problem = ProblemInstance(
-            robots=[Robot(2, (4, 5)), Robot(4, (6, 5))],
+            robots=[Robot(2, (5, 6)), Robot(4, (6, 5))],
             sku_capacities=[1, 1, 1],
             pallets=pallets,
             orders=[Order(0, [1]), Order(1, [0, 2])],
@@ -79,66 +80,63 @@ class TestAisleAwareSolver(unittest.TestCase):
         )
         solver._assign_free_robots()
 
-        # R4 plans before R2 is adjacent to P2. The deterministic stored plan
-        # starts with P2 and then Pnext.
         self.assertTrue(solver._select_new_aisle(4))
         self.assertEqual(
             [stop.pallet_id for stop in solver.states[4].aisle_plan.stops],
             [0, 2],
         )
+        self.assertTrue(solver._activate_current_stop(4))
+        self.assertEqual(solver.states[4].pallet_id, 0)
+        self.assertEqual(solver.states[4].pickup, (5, 5))
+        self.assertEqual(solver.pallet_claims[0], 4)
 
-        # R2 moves beneath P2. This is the state where both robots could
-        # otherwise choose each other's neighboring pallet positions.
+        # R2 arrives beside P2. At the first action-start snapshot this is only
+        # a one-timestep adjacency, so the per-timestep greedy replan keeps P2.
         solver.simulator.step(
             [Action(world.timestep, 2, ActionType.MOVE, (5, 5))]
         )
-        self.assertIn(0, solver._priority_adjacent_pallet_ids(4))
+        first_intent = solver._intent(4)
+        self.assertNotIn(
+            0,
+            solver._persistent_priority_blocked_pallet_ids(4),
+        )
+        self.assertEqual(solver.states[4].pallet_id, 0)
+        self.assertEqual(first_intent.move_goal, (5, 5))
+        self.assertEqual(solver.states[4].deferred_pallet_ids, set())
 
-        # Higher-priority R2 is still allowed to select P4 even though R4 is
-        # standing on P4's best pickup cell.
-        self.assertTrue(solver._select_new_aisle(2))
-        self.assertTrue(solver._activate_current_stop(2))
-        self.assertEqual(solver.states[2].pallet_id, 1)
-        self.assertEqual(solver.states[2].pickup, (6, 5))
-
-        first_intents = {
-            2: solver._intent(2),
-            4: solver._intent(4),
-        }
-        self.assertEqual(first_intents[2].move_goal, (6, 5))
-
-        # Activating R4's stale stored P2 stop triggers a live adjacency check.
-        # R4 replans the aisle, skips P2, activates Pnext, and moves right.
+        # R2 stays for one more timestep. Now the adjacency streak reaches two,
+        # so R4 checks P2 off this greedy pass, releases its claim, and chooses
+        # Pnext immediately instead of waiting for the blocked pickup cell.
+        solver.simulator.step([])
+        second_intent = solver._intent(4)
+        self.assertIn(
+            0,
+            solver._persistent_priority_blocked_pallet_ids(4),
+        )
+        self.assertIn(0, solver.states[4].deferred_pallet_ids)
         self.assertEqual(solver.states[4].pallet_id, 2)
-        self.assertEqual(first_intents[4].move_goal, (7, 5))
+        self.assertEqual(second_intent.move_goal, (7, 5))
+        self.assertNotIn(0, solver.pallet_claims)
+        self.assertEqual(solver.pallet_claims[2], 4)
 
-        first_moves = solver._plan_moves(first_intents)
-        first_by_robot = {action.robot_id: action for action in first_moves}
-        self.assertNotIn(2, first_by_robot)
-        self.assertEqual(first_by_robot[4].target, (7, 5))
-        solver.simulator.step(first_moves)
+        # R2 leaves while R4 moves to Pnext. R4 services Pnext, then the final
+        # same-aisle rescan is allowed to reconsider the deferred P2 because its
+        # higher-priority blocker is gone.
+        solver.simulator.step(
+            [
+                Action(world.timestep, 2, ActionType.MOVE, (5, 6)),
+                Action(world.timestep, 4, ActionType.MOVE, (7, 5)),
+            ]
+        )
+        third_intent = solver._intent(4)
+        self.assertEqual(third_intent.action, ActionType.PICK)
+        self.assertEqual(third_intent.target, (7, 4))
 
-        # R4 has now cleared R2's desired pickup cell. On the next timestep R2
-        # enters it while R4 picks Pnext.
-        second_intents = {
-            2: solver._intent(2),
-            4: solver._intent(4),
-        }
-        self.assertEqual(second_intents[4].action, ActionType.PICK)
-        self.assertEqual(second_intents[4].target, (7, 4))
+        solver.simulator.step(
+            [Action(world.timestep, 4, ActionType.PICK, (7, 4))]
+        )
+        solver._post_action(4, third_intent)
 
-        second_moves = solver._plan_moves(second_intents)
-        second_by_robot = {action.robot_id: action for action in second_moves}
-        self.assertEqual(second_by_robot[2].target, (6, 5))
-
-        second_fixed = [
-            Action(world.timestep, 4, ActionType.PICK, (7, 4)),
-        ]
-        solver.simulator.step(second_moves + second_fixed)
-        solver._post_action(4, second_intents[4])
-
-        # The final same-aisle rescan now sees that R2 moved away from P2, so
-        # R4 can come back for the previously skipped requirement.
         state4 = solver.states[4]
         self.assertIsNotNone(state4.aisle_plan)
         self.assertEqual(state4.aisle_stop_index, 0)
@@ -146,14 +144,48 @@ class TestAisleAwareSolver(unittest.TestCase):
         self.assertEqual(state4.remaining_by_sku, {0: 1})
         world.validate()
 
-    def test_higher_priority_robot_passing_does_not_preempt_active_pick(self):
+    def test_persistent_adjacency_does_not_affect_aisle_selection(self):
+        # Persistent adjacency is a local greedy traversal rule only. Even when
+        # P0 has been beside higher-priority R2 for two timesteps, R4's cheap
+        # and detailed aisle-selection heuristics must still consider that aisle.
+        pallets = [
+            Pallet(0, (6, 4), 1, 1, 1, (6, 4)),
+            Pallet(1, (10, 10), 0, 1, 1, (10, 10)),
+        ]
+        problem = ProblemInstance(
+            robots=[Robot(2, (6, 5)), Robot(4, (8, 5))],
+            sku_capacities=[1, 1],
+            pallets=pallets,
+            orders=[Order(0, [0]), Order(1, [1])],
+        )
+        world = WorldState(problem)
+        solver = AisleAwareSolver(
+            world,
+            robot_ids=[2, 4],
+            order_ids=[0, 1],
+            max_timesteps=100,
+        )
+        solver._assign_free_robots()
+
+        solver._refresh_priority_adjacency_streaks()
+        solver.simulator.step([])
+        solver._refresh_priority_adjacency_streaks()
+        self.assertIn(
+            0,
+            solver._persistent_priority_blocked_pallet_ids(4),
+        )
+
+        self.assertTrue(solver._select_new_aisle(4))
+        self.assertEqual(solver.states[4].aisle_plan.stops[0].pallet_id, 0)
+
+    def test_persistent_higher_priority_robot_does_not_preempt_active_pick(self):
         pallet = Pallet(0, (6, 4), 1, 3, 3, (6, 4))
         other = Pallet(1, (10, 10), 0, 1, 1, (10, 10))
         problem = ProblemInstance(
             robots=[Robot(2, (5, 3)), Robot(4, (6, 5))],
             sku_capacities=[1, 3],
             pallets=[pallet, other],
-            orders=[Order(0, [0]), Order(1, [1, 1])],
+            orders=[Order(0, [0]), Order(1, [1, 1, 1])],
         )
         world = WorldState(problem)
         solver = AisleAwareSolver(
@@ -174,9 +206,8 @@ class TestAisleAwareSolver(unittest.TestCase):
         self.assertEqual(first_pick.action, ActionType.PICK)
         self.assertEqual(first_pick.target, (6, 4))
 
-        # R2 drives onto the opposite side of P4 while R4 is actively picking.
-        # The adjacency rule is only for choosing future stops, so this must not
-        # revoke R4's active claim or force it to replan away from P4.
+        # R2 moves onto the opposite side of P0 while R4 is already servicing
+        # it. The first adjacent timestep must not interrupt the active pick.
         solver.simulator.step(
             [
                 Action(world.timestep, 2, ActionType.MOVE, (6, 3)),
@@ -185,14 +216,26 @@ class TestAisleAwareSolver(unittest.TestCase):
         )
         solver._post_action(4, first_pick)
 
-        self.assertIn(0, solver._priority_adjacent_pallet_ids(4))
-        self.assertNotIn(0, solver._unavailable_pallet_ids(4))
+        second_pick = solver._intent(4)
+        self.assertEqual(second_pick.action, ActionType.PICK)
+        self.assertEqual(second_pick.target, (6, 4))
+        solver.simulator.step(
+            [Action(world.timestep, 4, ActionType.PICK, (6, 4))]
+        )
+        solver._post_action(4, second_pick)
+
+        # R2 has now remained adjacent for two consecutive action-start states,
+        # so P0 is persistently blocked for future greedy choices. R4 is already
+        # at the pickup cell, however, so active service remains protected.
+        third_pick = solver._intent(4)
+        self.assertIn(
+            0,
+            solver._persistent_priority_blocked_pallet_ids(4),
+        )
         self.assertEqual(solver.pallet_claims[0], 4)
         self.assertEqual(solver.states[4].pallet_id, 0)
-
-        next_pick = solver._intent(4)
-        self.assertEqual(next_pick.action, ActionType.PICK)
-        self.assertEqual(next_pick.target, (6, 4))
+        self.assertEqual(third_pick.action, ActionType.PICK)
+        self.assertEqual(third_pick.target, (6, 4))
         world.validate()
 
     def test_final_aisle_rescan_adds_newly_released_pallet(self):
