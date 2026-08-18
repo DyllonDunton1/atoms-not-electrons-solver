@@ -15,11 +15,12 @@ SINGLE_ROBOT_FOOTPRINT: Footprint = frozenset({(0, 0)})
 
 
 class PathPlanner:
-    """Plan shortest collision-free paths through the static warehouse map.
+    """Plan shortest collision-free paths through a spatial warehouse snapshot.
 
-    Time-based robot reservations are handled by ``scheduler.py``. This module
-    focuses on spatial path planning and supports larger footprints when a
-    robot is moving one or more docked pallets.
+    The caller supplies any temporary robot cells that should act as blockers
+    for the current route calculation. The planner itself is deliberately
+    unaware of future robot motion; the fleet solver replans after every real
+    timestep and commits only the first step of each spatial path.
     """
 
     def __init__(self, world: WorldState) -> None:
@@ -83,13 +84,14 @@ class PathPlanner:
         The returned path contains both the start and goal robot-center
         positions. Every pallet home cell remains reserved even while that
         pallet is being carried elsewhere, and a moved pallet's current cell is
-        blocked as well. ``ignored_pallet_ids`` is for pallets that are part of
-        the moving footprint itself, such as pallets currently docked to the
-        robot. Their own home/current cells may be occupied by that moving
-        footprint, but robot centers still may not enter any pallet home cell.
-        Other robots are intentionally not static obstacles; time-based robot
-        conflicts belong to the scheduler/reservation layer. An empty list
-        means no valid path exists.
+        blocked as well. ``ignored_pallet_ids`` is for pallets represented by a
+        moving robot footprint that should not independently distort this path,
+        such as the robot's own docked pallets or docked pallets on lower-priority
+        traffic that the fleet layer intentionally ignores. Their own
+        home/current cells may be occupied by a moving footprint, but robot
+        centers still may not enter any pallet home cell. Temporary robot
+        blockers are supplied through ``blocked``. An empty list means no valid
+        spatial path exists.
         """
         if not footprint or (0, 0) not in footprint:
             raise ValueError("Footprint must include the robot center at (0, 0)")
@@ -146,7 +148,6 @@ class PathPlanner:
         while frontier:
             _, current_g, _, current = heappop(frontier)
 
-            # Ignore stale heap entries that were superseded by a shorter route.
             if current_g != g_score.get(current):
                 continue
 
