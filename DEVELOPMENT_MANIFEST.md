@@ -10,7 +10,7 @@ Concise design notes, invariants, benchmark history, and the current optimizatio
 - `ReservationTable` protects only the first moves already committed during the current timestep.
 - `MultiRobotSolver` runs FIFO orders and deterministic robot-ID priority traffic.
 - `AislePlanner` chooses useful aisles and service stops for an order.
-- `AisleAwareSolver` layers aisle batching on top of the same fleet traffic machinery.
+- `AisleAwareSolver` layers aisle batching and live pallet-availability rules on top of the same fleet traffic machinery.
 - `metrics.py` measures generated schedules independently of solver strategy.
 
 ## Non-negotiable correctness rules
@@ -65,9 +65,11 @@ A wait means: **there is no safe first move worth committing from the current sn
 
 Typical examples:
 
-- A lower-ID robot wants a cell currently occupied by higher-ID traffic. It waits while the higher-ID robot clears.
+- A lower-ID robot wants a cell currently occupied by higher-ID traffic. It waits while that traffic clears through its own normal task/path decisions.
 - A higher-ID robot has no complete spatial route around the current lower-ID blockers. It waits and tries again after the world changes.
-- A higher-ID robot is currently performing repeated `PICK` actions in a lower-ID robot's preferred route. The lower-ID robot may wait for those picks to finish; task preemption is intentionally not part of the first simple traffic model.
+- A higher-ID robot is currently performing repeated `PICK` actions in a lower-ID robot's preferred route. The lower-ID robot may wait for those picks to finish; task preemption is intentionally not part of the traffic model.
+
+The fleet layer intentionally does **not** contain a generic forced-side-step rule for a synthetic exact-goal swap where two robots' final movement goals are literally each other's current cells. The warehouse strategy avoids the realistic source of that pattern at the aisle-selection layer instead of complicating traffic with another special case.
 
 ## Rigid-footprint priority behavior
 
@@ -108,6 +110,20 @@ Priority applies to the complete robot assembly.
 - Before leaving after the last stored stop, the solver rescans the same aisle against live pallet availability and remaining requirements. Newly released useful pallets can extend the visit in place.
 - Refill remains a subroutine of the active aisle; the aisle commitment survives the refill trip.
 
+### Priority-aware pallet availability
+
+A small warehouse-specific rule prevents neighboring robots from selecting each other's just-finished pickup positions and creating an artificial goal swap.
+
+- The rule applies only while choosing or replanning **future aisle stops**.
+- For robot `R`, an undocked pallet currently adjacent to an active lower-ID robot is temporarily unavailable to `R`.
+- Example: if R2 is beside P2 and R4 is beside P4, R2 may still choose P4 because R4 has lower priority. If R4 would otherwise choose P2, it temporarily skips P2 because R2 has higher priority and is already beside it.
+- R4 then continues to another useful stop, which naturally clears P4 for R2 without any forced traffic maneuver.
+- Once R2 moves away, P2 becomes available again. The existing final same-aisle rescan can add it back later if R4 still needs it.
+- Adjacency is **not** a claim and does not reserve a pallet into the future.
+- Most importantly, adjacency never preempts an already-active stop. If R4 is actively picking P4 and R2 merely drives past the other side of P4, R4 keeps its claim and continues picking.
+
+This keeps the responsibility in the correct layer: aisle planning decides which pallet is sensible to service next; the fleet traffic layer only resolves the first physical move toward the chosen goal.
+
 ## Benchmark history
 
 These numbers are historical references from earlier traffic implementations, not guarantees for the new one-step scheduler.
@@ -116,11 +132,11 @@ These numbers are historical references from earlier traffic implementations, no
 - First completed full aisle-aware 5-robot / 1,000-order run: **67,840 timesteps**, **263,139 moves**, **229,603 collection moves**, **8,491 aisle visits**, **25 aisle re-entries**.
 - A later predictive-traffic run reached **998/1000 orders by timestep 72,000** and exposed a long rigid-robot replenishment oscillation. That failure, together with earlier traffic-specific patches, motivated replacing future trajectory prediction with the current one-step model.
 
-A new performance baseline should be recorded only after the simplified scheduler completes the normal unit/integration tests and a fresh full 1,000-order run.
+A new performance baseline should be recorded only after the simplified scheduler and priority-aware aisle selection complete the normal unit/integration tests and a fresh full 1,000-order run.
 
-## Regression coverage for the simplified traffic model
+## Regression coverage
 
-`tests/test_multi_robot_solver.py` now includes focused traffic cases for:
+`tests/test_multi_robot_solver.py` contains the focused fleet-traffic cases for:
 
 - a lower-ID robot keeping its natural route and waiting while a higher-ID robot detours;
 - the rigid replenishment-row case where the higher-ID robot clears laterally across multiple replans;
@@ -128,7 +144,12 @@ A new performance baseline should be recorded only after the simplified schedule
 - a lower-ID robot waiting while a higher-ID robot performs repeated picks, then proceeding after that robot starts clearing;
 - two-robot and five-robot first-ten-order integration/replay checks.
 
-`tests/test_scheduler.py` is now limited to the one-step reservation primitives: rigid-footprint cell reservations, waits, and edge conflicts. The old timed-A* scheduler tests were removed with the old planner.
+`tests/test_aisle_solver.py` adds warehouse-specific coordination regressions for:
+
+- R2 and R4 finishing beside neighboring pallets, R2 selecting R4's side while R4 skips the pallet beside higher-priority R2, moves on, and later reacquires the skipped pallet through the final aisle rescan;
+- R4 retaining an active P4 claim and continuing to pick while higher-priority R2 drives onto the opposite side of that pallet.
+
+`tests/test_scheduler.py` is limited to the one-step reservation primitives: rigid-footprint cell reservations, waits, and edge conflicts. The old timed-A* scheduler tests were removed with the old planner.
 
 See `tests/README.md` for a file-by-file test guide.
 
@@ -140,10 +161,11 @@ Correctness first:
 - preserve full rigid footprints;
 - preserve pallet-home invariants;
 - preserve deterministic robot-ID priority;
+- preserve active pallet claims;
 - preserve FIFO assignment and exact fulfillment;
 - change one optimization layer at a time and measure it independently.
 
-The current traffic planner should remain simple unless a reproducible failure demonstrates that a new rule is actually required.
+The current traffic planner should remain simple unless a reproducible failure demonstrates that a new movement rule is actually required. Warehouse-specific task conflicts should be solved in the task/aisle layer when possible rather than by adding traffic exceptions.
 
 ## Planned next experiment: soft traffic guides
 
@@ -160,4 +182,4 @@ These should be **soft costs**, not hard one-way constraints. The experiment sho
 
 ## Architecture summary
 
-> Aisle planning decides what to service. Spatial A* decides the preferred route through the current warehouse geometry. The fleet scheduler commits only one footprint-safe move per robot in ID order. The simulator decides whether the complete timestep is legal. Then everything traffic-related is recomputed from the new real world state.
+> Aisle planning decides what to service, including temporary priority-aware pallet availability. Spatial A* decides the preferred route through the current warehouse geometry. The fleet scheduler commits only one footprint-safe move per robot in ID order. The simulator decides whether the complete timestep is legal. Then everything traffic-related is recomputed from the new real world state.
