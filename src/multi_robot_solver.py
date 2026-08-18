@@ -561,7 +561,10 @@ class MultiRobotSolver:
             max_timestep=timestep + 1 + distance + PATH_SLACK,
         )
         if not continuation:
-            return []
+            # A forced yield promises only this immediate, legal move.  If the
+            # current reservations make the rest of the route unavailable, take
+            # the escape now and replan from the new state next timestep.
+            return first_step
         return first_step[:-1] + continuation
 
     def _plan_moves(
@@ -622,8 +625,7 @@ class MultiRobotSolver:
                         if pallet.docked_to is not None
                     ]
                     distance = abs(goal[0] - robot.position[0]) + abs(
-                        goal[1] - robot.position[1]
-                    )
+                        goal[1] - robot.position[1])
                     trajectory = planning.plan_timed_path(
                         robot.position,
                         goal,
