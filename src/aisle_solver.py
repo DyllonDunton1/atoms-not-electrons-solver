@@ -31,6 +31,7 @@ class AisleRobotState(RobotState):
 
     remaining_by_sku: Dict[int, int] = field(default_factory=dict)
     active_aisle_id: Optional[int] = None
+    previous_aisle_id: Optional[int] = None
     aisle_plan: Optional[AislePlan] = None
     aisle_stop_index: int = 0
     deferred_pallet_ids: Set[int] = field(default_factory=set)
@@ -180,17 +181,37 @@ class AisleAwareSolver(MultiRobotSolver):
         return unavailable
 
     def _select_new_aisle(self, robot_id: int) -> bool:
-        """Choose the best aisle without considering transient adjacency."""
+        """Choose a new aisle without immediately reentering the previous one."""
         state = self.states[robot_id]
         robot = self.world.robots[robot_id]
+        congestion = self._aisle_congestion(robot_id)
+        unavailable = self._base_unavailable_pallet_ids(robot_id)
+        blocked = self._permanent_robot_cells(robot_id)
+        excluded = (
+            []
+            if state.previous_aisle_id is None
+            else [state.previous_aisle_id]
+        )
 
         plan = self.aisle_planner.choose_plan(
             robot.position,
             state.remaining_by_sku,
-            congestion_by_aisle=self._aisle_congestion(robot_id),
-            unavailable_pallet_ids=self._base_unavailable_pallet_ids(robot_id),
-            blocked=self._permanent_robot_cells(robot_id),
+            congestion_by_aisle=congestion,
+            unavailable_pallet_ids=unavailable,
+            blocked=blocked,
+            excluded_aisle_ids=excluded,
         )
+
+        # If every remaining useful pallet is in the previous aisle, allow that
+        # aisle again rather than creating a permanent no-work state.
+        if plan is None and state.previous_aisle_id is not None:
+            plan = self.aisle_planner.choose_plan(
+                robot.position,
+                state.remaining_by_sku,
+                congestion_by_aisle=congestion,
+                unavailable_pallet_ids=unavailable,
+                blocked=blocked,
+            )
         if plan is None:
             return False
 
@@ -295,6 +316,7 @@ class AisleAwareSolver(MultiRobotSolver):
 
     def _finish_active_aisle(self, robot_id: int) -> None:
         state = self.states[robot_id]
+        finished_aisle_id = state.active_aisle_id
         self._release_pallet(robot_id)
         state.active_aisle_id = None
         state.aisle_plan = None
@@ -305,6 +327,8 @@ class AisleAwareSolver(MultiRobotSolver):
         state.row_goal = None
         state.deferred_pallet_ids.clear()
         state.greedy_plan_timestep = None
+        if finished_aisle_id is not None:
+            state.previous_aisle_id = finished_aisle_id
 
         if state.remaining_by_sku:
             state.phase = COLLECT
