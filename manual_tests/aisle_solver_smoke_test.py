@@ -24,6 +24,60 @@ BIG_ORDER_PATH = REPO_ROOT / "source_material" / "BIG_ORDER.txt"
 MAX_TIMESTEPS_ERROR = "Multi-robot solver exceeded max_timesteps"
 
 
+class DiagnosticAisleAwareSolver(AisleAwareSolver):
+    """Aisle solver that remembers the most recent read-only traffic decision."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_plan_timestep = None
+        self.last_intents = {}
+        self.last_preferred_next = {}
+        self.last_committed_next = {}
+
+    def _plan_moves(self, intents):
+        """Run normal movement planning, then record its goals and first steps.
+
+        The solver behavior is unchanged. After the normal planner returns its
+        move actions, this method reconstructs the preferred first step for any
+        robot that had to wait. Robots that did move already expose their chosen
+        first step directly in the returned action.
+        """
+        actions = super()._plan_moves(intents)
+        move_by_robot = {action.robot_id: action for action in actions}
+        committed_destinations = {}
+        preferred_next = {}
+        committed_next = {}
+
+        for robot_id in sorted(self.world.robots):
+            robot = self.world.robots[robot_id]
+            move_action = move_by_robot.get(robot_id)
+            goal = intents[robot_id].move_goal
+
+            if move_action is not None:
+                preferred_next[robot_id] = move_action.target
+                destination = move_action.target
+            else:
+                destination = robot.position
+                if goal is None:
+                    preferred_next[robot_id] = None
+                else:
+                    path = self._preferred_path(
+                        robot_id,
+                        goal,
+                        committed_destinations,
+                    )
+                    preferred_next[robot_id] = path[1] if len(path) >= 2 else None
+
+            committed_destinations[robot_id] = destination
+            committed_next[robot_id] = destination
+
+        self.last_plan_timestep = self.world.timestep
+        self.last_intents = dict(intents)
+        self.last_preferred_next = preferred_next
+        self.last_committed_next = committed_next
+        return actions
+
+
 def solve_with_progress(solver: AisleAwareSolver, label: str, stop_timestep=None):
     result = {}
     error = {}
@@ -84,6 +138,9 @@ def print_snapshot(solver: AisleAwareSolver) -> None:
     print(f"Snapshot at t={solver.world.timestep}:")
     print(f"  pallet_claims={dict(sorted(solver.pallet_claims.items()))}")
 
+    if isinstance(solver, DiagnosticAisleAwareSolver):
+        print(f"  last_traffic_plan_timestep={solver.last_plan_timestep}")
+
     for robot_id in solver.active_robot_ids:
         robot = solver.world.robots[robot_id]
         state = solver.states[robot_id]
@@ -138,6 +195,20 @@ def print_snapshot(solver: AisleAwareSolver) -> None:
             )
         }
 
+        intent_description = None
+        preferred_next = None
+        committed_next = None
+        if isinstance(solver, DiagnosticAisleAwareSolver):
+            intent = solver.last_intents.get(robot_id)
+            if intent is not None:
+                action_name = intent.action.value if intent.action is not None else None
+                intent_description = (
+                    f"action={action_name} target={intent.target} "
+                    f"move_goal={intent.move_goal}"
+                )
+            preferred_next = solver.last_preferred_next.get(robot_id)
+            committed_next = solver.last_committed_next.get(robot_id)
+
         print(
             f"  robot {robot_id}: pos={robot.position} footprint={footprint} "
             f"docked={list(robot.docked_pallets)}"
@@ -153,6 +224,10 @@ def print_snapshot(solver: AisleAwareSolver) -> None:
             f"    pickup={state.pickup} row_goal={state.row_goal} "
             f"refill_robot_home={state.refill_robot_home} "
             f"refill_pallet_home={state.refill_pallet_home}"
+        )
+        print(
+            f"    last_intent={intent_description} "
+            f"preferred_next={preferred_next} committed_next={committed_next}"
         )
         print(
             f"    remaining={state.remaining} "
@@ -187,7 +262,12 @@ def main() -> None:
     if args.stop_timestep is not None:
         solver_kwargs["max_timesteps"] = args.stop_timestep
 
-    solver = AisleAwareSolver(
+    solver_class = (
+        DiagnosticAisleAwareSolver
+        if args.stop_timestep is not None
+        else AisleAwareSolver
+    )
+    solver = solver_class(
         world,
         robot_ids=robot_ids,
         order_ids=order_ids,
