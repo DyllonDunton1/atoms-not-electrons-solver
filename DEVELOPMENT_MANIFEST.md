@@ -192,12 +192,25 @@ The directed-column strategy intentionally removes the old final same-unit resca
 
 - Once a direction is chosen, future stops keep that monotonic order.
 - The strategy does not rerun greedy nearest-neighbor ordering every timestep.
-- If a future stop becomes unavailable, it is deferred/skipped instead of reversing the pass.
+- A hard-unavailable future stop is deferred/skipped instead of reversing the pass.
 - Refill of an already-active stop remains allowed and preserves the current pass.
 - Reaching the final stored stop ends the pass immediately.
 - Remaining work is sent back to the global 48-route decision.
 - The just-finished column is excluded from the next normal decision.
-- The inherited fallback may select the same previous column again only if no other useful column exists. This is the intentional **must backtrack** case.
+- The fallback may select the same previous column again only if no other useful column exists. This is the intentional **must backtrack** case.
+
+### Persistent adjacency scope
+
+Persistent robot-pallet adjacency is intentionally narrow in the 24-column strategy.
+
+- Normal 48-route selection ignores persistent adjacency. A robot may be many timesteps away, so a temporary nearby robot should not eliminate an otherwise strong column candidate.
+- Active directed stops also ignore adjacency by itself. The pallet must be hard-unavailable through a conflicting claim, docking, or moved-pallet state before the stop is skipped.
+- Claims, docked pallets, and moved pallets remain hard exclusions everywhere.
+- Persistent adjacency is checked only when the solver would otherwise fall back into the **previous column** because no other useful column exists.
+- Only persistent blockers on pallets belonging to that previous column are added to the fallback's unavailable set.
+- If those blockers make the previous column temporarily unusable, the solver returns no intent for that timestep and waits for a new world state instead of repeatedly leaving/reselecting the same column inside one `_intent()` call.
+
+This rule fixes the observed same-timestep previous-column reselection loop without making far-away candidate scoring overly pessimistic.
 
 ### What remains unchanged
 
@@ -212,7 +225,7 @@ The column experiment does not alter:
 - refill mechanics;
 - fulfillment logic.
 
-Only collection grouping, route candidate generation, scoring, and stop order are changed.
+Only collection grouping, route candidate generation, scoring, stop order, and the column-specific previous-unit fallback policy are changed.
 
 ## Diagnostic runners
 
@@ -255,7 +268,7 @@ Important collection tests:
 - `tests/test_aisles.py` — original 12-island layout/scoring/service planner.
 - `tests/test_aisle_solver.py` — original aisle-aware coordination/refill behavior.
 - `tests/test_previous_aisle.py` — previous-unit exclusion and fallback.
-- `tests/test_column_solver.py` — 24-column geometry, directed monotonic plans, distinct-SKU utility, and removal of the final same-column rescan.
+- `tests/test_column_solver.py` — 24-column geometry, directed monotonic plans, distinct-SKU utility, removal of the final same-column rescan, normal adjacency-ignore behavior, and previous-column-only adjacency fallback.
 
 ## Benchmark history
 
