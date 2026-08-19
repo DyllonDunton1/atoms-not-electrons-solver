@@ -34,11 +34,8 @@ class ReservationTable:
         self._edges: Dict[int, Dict[Edge, int]] = {}
         self._pallets: Dict[int, List[_StoredPalletInterval]] = {}
         self._permanent_vertices: Dict[Position, int] = {}
-        # A terminal hold begins only when a robot finishes its currently
-        # committed schedule.  Unlike the old fixed parking cells, this lets a
-        # robot fulfill at the closest legal point on y=0 while still making
-        # its idle post-order occupancy visible to later planners.
         self._terminal_vertices: Dict[int, Tuple[Position, int]] = {}
+        self._finite_horizon = 0
 
     def _times(self, timestep: int) -> range:
         return range(timestep - self.padding, timestep + self.padding + 1)
@@ -67,13 +64,7 @@ class ReservationTable:
         start_timestep: int,
         owner: Optional[int] = None,
     ) -> bool:
-        """Return whether ``position`` can be occupied indefinitely from start.
-
-        Finite reservations are already stored with their configured time
-        padding, so scanning those buckets from ``start_timestep`` onward also
-        respects the safety margin.  Existing terminal holds are indefinite and
-        therefore conflict whenever another owner holds the same cell.
-        """
+        """Return whether ``position`` can be occupied indefinitely from start."""
         permanent = self._permanent_vertices.get(position)
         if permanent not in (None, owner):
             return False
@@ -185,6 +176,7 @@ class ReservationTable:
                     )
             for cell in cells:
                 bucket[cell] = owner
+        self._finite_horizon = max(self._finite_horizon, timestep + self.padding)
 
     def reserve_edges(
         self,
@@ -205,6 +197,7 @@ class ReservationTable:
                     )
             for edge in edge_list:
                 bucket[edge] = owner
+        self._finite_horizon = max(self._finite_horizon, timestep + self.padding)
 
     def first_pallet_conflict(
         self,
@@ -254,6 +247,7 @@ class ReservationTable:
         bucket = self._pallets.setdefault(reservation.pallet_id, [])
         bucket.append(stored)
         bucket.sort(key=lambda item: (item.start, item.end, item.robot_id))
+        self._finite_horizon = max(self._finite_horizon, stored.end)
 
     def pallet_intervals(self, pallet_id: int) -> Tuple[Tuple[int, int, int, int], ...]:
         return tuple(
@@ -261,12 +255,47 @@ class ReservationTable:
             for item in self._pallets.get(pallet_id, [])
         )
 
+    def compact_before(self, frontier_timestep: int) -> int:
+        """Discard finite reservations that no future plan can query.
+
+        The scheduler's planning frontier is monotonic.  A candidate beginning
+        at ``frontier_timestep`` can inspect times as early as one padding width
+        before it, so retain that boundary and everything after it.
+
+        Returns the number of time buckets / pallet intervals removed.
+        """
+        cutoff = frontier_timestep - self.padding
+        removed = 0
+
+        old_vertex_count = len(self._vertices)
+        self._vertices = {
+            timestep: bucket
+            for timestep, bucket in self._vertices.items()
+            if timestep >= cutoff
+        }
+        removed += old_vertex_count - len(self._vertices)
+
+        old_edge_count = len(self._edges)
+        self._edges = {
+            timestep: bucket
+            for timestep, bucket in self._edges.items()
+            if timestep >= cutoff
+        }
+        removed += old_edge_count - len(self._edges)
+
+        for pallet_id in list(self._pallets):
+            intervals = self._pallets[pallet_id]
+            retained = [interval for interval in intervals if interval.end >= cutoff]
+            removed += len(intervals) - len(retained)
+            if retained:
+                self._pallets[pallet_id] = retained
+            else:
+                del self._pallets[pallet_id]
+
+        return removed
+
     def reservation_horizon(self) -> int:
-        # Terminal holds are deliberately omitted: they are indefinite.  This
-        # method answers how far existing finite schedules extend so a newly
-        # finishing robot can prove its chosen row cell is safe through all
-        # already-committed future movement.
-        times = list(self._vertices) + list(self._edges)
-        for intervals in self._pallets.values():
-            times.extend(interval.end for interval in intervals)
-        return max(times, default=0)
+        # Cached rather than rescanning every retained time bucket.  The cache
+        # is monotonic; a stale value can only be in the past after compaction,
+        # in which case fulfillment ignores it because it is <= arrival time.
+        return self._finite_horizon
