@@ -300,7 +300,7 @@ class DiagnosticAisleAwareSolver(AisleAwareSolver):
         reservations = ReservationTable()
         decisions = {}
 
-        for robot_id in sorted(self.world.robots):
+        for robot_id in self._priority_order():
             decisions[robot_id] = self._traffic_decision_record(
                 robot_id,
                 intents,
