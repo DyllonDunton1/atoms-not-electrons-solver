@@ -72,7 +72,7 @@ class TestPalletAwarePriority(unittest.TestCase):
         # Removing R4's pallet returns the normal lower-ID-first ordering.
         world.robots[4].docked_pallets.clear()
         world.pallets[22].docked_to = None
-        world.pallets[22].dock_offset = None
+        world.pallets[22].docked_offset = None
         self.assertEqual(solver._priority_order(), [2, 4])
 
 
