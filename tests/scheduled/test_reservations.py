@@ -73,6 +73,33 @@ class ReservationTests(unittest.TestCase):
         with self.assertRaises(ReservationConflict):
             table.set_terminal_hold((9, 0), 20, 0)
 
+    def test_compaction_keeps_padding_boundary_for_future_vertex_checks(self):
+        table = ReservationTable(padding=1)
+        table.reserve_pose([(5, 5)], 8, 0)   # stored through t=9
+        table.reserve_pose([(6, 5)], 10, 0)  # stored from t=9
+        table.compact_before(10)
+
+        # A new raw t=10 pose checks t=9..11, so the t=9 boundary must remain.
+        self.assertFalse(table.vertex_reservation_is_free([(5, 5)], 10, 1))
+        self.assertFalse(table.vertex_reservation_is_free([(6, 5)], 10, 1))
+
+    def test_compaction_discards_pallet_intervals_that_cannot_overlap_future(self):
+        table = ReservationTable(padding=1)
+        table.reserve_pallet(PalletReservation(7, 0, 5, 0, 1))   # stored end=6
+        table.reserve_pallet(PalletReservation(7, 10, 12, 1, 2)) # stored 9..13
+        table.compact_before(10)  # cutoff=9
+        self.assertEqual(table.pallet_intervals(7), ((9, 13, 1, 2),))
+
+    def test_cached_reservation_horizon_tracks_latest_finite_reservation(self):
+        table = ReservationTable(padding=1)
+        table.reserve_pose([(1, 1)], 10, 0)
+        self.assertEqual(table.reservation_horizon(), 11)
+        table.reserve_pallet(PalletReservation(7, 20, 25, 0, 1))
+        self.assertEqual(table.reservation_horizon(), 26)
+        table.compact_before(100)
+        # A stale cached value is intentionally allowed only in the past.
+        self.assertEqual(table.reservation_horizon(), 26)
+
 
 if __name__ == "__main__":
     unittest.main()
