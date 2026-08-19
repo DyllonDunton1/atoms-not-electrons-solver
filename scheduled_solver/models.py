@@ -126,6 +126,12 @@ class PlannerStats:
     beam_pruned: int = 0
     astar_calls: int = 0
     astar_expansions: int = 0
+    astar_seconds: float = 0.0
+    row_fast_path_hits: int = 0
+    inventory_seconds: float = 0.0
+    candidate_seconds: float = 0.0
+    compaction_seconds: float = 0.0
+    candidate_expansions_skipped: int = 0
     wait_steps: int = 0
     refill_trips: int = 0
     failed_expansions: int = 0
