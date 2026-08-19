@@ -17,6 +17,9 @@ from .models import CommittedOrderSchedule, OrderSpec, Position
 from .planner import FullHorizonBeamPlanner, _BeamState
 
 
+_UNSCHEDULED_PREFIX = "Full-horizon beam search could not schedule order "
+
+
 class BudgetAwareFullHorizonBeamPlanner(FullHorizonBeamPlanner):
     """Full-horizon planner with safe low-budget candidate rejection."""
 
@@ -77,7 +80,13 @@ class BudgetAwareFullHorizonBeamPlanner(FullHorizonBeamPlanner):
                 start_position,
                 start_timestep,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            # Only the base planner's explicit "could not schedule" result is
+            # eligible for a budget rescue; unrelated runtime errors must still
+            # surface immediately instead of being hidden by a retry.
+            if not str(exc).startswith(_UNSCHEDULED_PREFIX):
+                raise
+
             # The low cap is purely a speed heuristic.  Nothing from a failed
             # order attempt has been committed yet, so it is safe to rerun the
             # same order against the identical reservation/inventory state.
