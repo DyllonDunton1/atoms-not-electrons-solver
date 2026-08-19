@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import time
 from collections import deque
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional
 
 from .config import SchedulerConfig
 from .geometry import WarehouseGeometry, build_geometry
@@ -97,16 +97,6 @@ class ScheduledSolver:
                 robot_id,
             )
 
-        # Give each robot a dedicated fulfillment parking cell. Other robots
-        # never route through it, which keeps a robot valid after its final
-        # queued order even though future work is not known when earlier plans
-        # are created. The owner may always leave/re-enter its own parking cell.
-        for robot_id in self.active_robot_ids:
-            parking = (robot_id, self.geometry.fulfillment_y)
-            if parking in self.geometry.static_blocked:
-                raise ValueError(f"Robot {robot_id} parking cell {parking} is statically blocked")
-            self.reservations.reserve_permanent_cell(parking, robot_id)
-
     def _preflight_commit(self, schedule: CommittedOrderSchedule) -> None:
         validate_schedule_structure(schedule, self.geometry)
         pose_by_time = {pose.timestep: pose for pose in schedule.poses}
@@ -143,6 +133,19 @@ class ScheduledSolver:
                     f"Pallet {pallet.pallet_id} conflicts before schedule commit"
                 )
 
+        # After FULFILL the robot remains at its chosen y=0 cell until this same
+        # robot receives another order.  Make sure that indefinite idle position
+        # does not collide with any already-committed future schedule.
+        if not self.reservations.terminal_hold_is_free(
+            schedule.end_position,
+            schedule.finish_timestep,
+            schedule.robot_id,
+        ):
+            raise ReservationConflict(
+                f"Terminal position {schedule.end_position} from "
+                f"t={schedule.finish_timestep} conflicts before commit"
+            )
+
     def _commit(self, schedule: CommittedOrderSchedule) -> None:
         self._preflight_commit(schedule)
         pose_by_time = {pose.timestep: pose for pose in schedule.poses}
@@ -168,6 +171,11 @@ class ScheduledSolver:
         for pallet in schedule.pallet_reservations:
             self.reservations.reserve_pallet(pallet)
         self.inventory.commit(schedule.inventory_events)
+        self.reservations.set_terminal_hold(
+            schedule.end_position,
+            schedule.finish_timestep,
+            schedule.robot_id,
+        )
 
         actions_by_time = {action.timestep for action in schedule.actions}
         for before, after in zip(schedule.poses, schedule.poses[1:]):
