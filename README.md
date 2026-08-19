@@ -102,9 +102,15 @@ where congestion is converted to distance using the same configured penalty used
 
 The directed-column solver intentionally removes the old final same-aisle rescan.
 
-Once a monotonic column pass reaches its last stored stop, the robot leaves that column immediately and performs a new global 48-route decision. A temporarily unavailable stop is deferred rather than causing the robot to reverse direction.
+Once a monotonic column pass reaches its last stored stop, the robot leaves that column immediately and performs a new global 48-route decision. A hard-unavailable stop is deferred rather than causing the robot to reverse direction.
 
-The just-finished column is excluded from the next normal choice. The inherited fallback may choose it again only when no other useful column exists. That is the deliberate **must backtrack** case.
+The just-finished column is excluded from the next normal choice. The fallback may choose it again only when no other useful column exists. That is the deliberate **must backtrack** case.
+
+### Previous-column adjacency policy
+
+Persistent robot-pallet adjacency is deliberately **not** used to reject normal 48-route candidates. A robot may be many timesteps away from a promising column, so another robot merely standing beside one of its pallets now should not make that route look bad. Claims, docked pallets, and moved pallets remain hard exclusions everywhere.
+
+Persistent adjacency is consulted only when the solver is about to fall back into the **previous column** because no other useful column exists. If the useful previous-column pallet is still persistently occupied by a higher-priority robot, the solver waits for a new world timestep instead of immediately re-entering the same column. Once the blocker clears, the previous column can be chosen as the required backtrack.
 
 ## Why the column experiment exists
 
