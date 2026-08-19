@@ -21,6 +21,8 @@ class SpaceTimeAStarTests(unittest.TestCase):
         planner = SpaceTimeAStar(self.make_geometry(), ReservationTable(0), path_horizon=20)
         path = planner.find_path((1, 1), 0, (3, 1), owner=0)
         self.assertEqual(path, [((1, 1), 0), ((2, 1), 1), ((3, 1), 2)])
+        self.assertEqual(planner.counters.fast_point_hits, 1)
+        self.assertEqual(planner.counters.expansions, 0)
 
     def test_static_obstacle_forces_detour(self):
         planner = SpaceTimeAStar(
@@ -30,6 +32,7 @@ class SpaceTimeAStarTests(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertNotIn(((2, 1), 1), path)
         self.assertGreater(len(path) - 1, 2)
+        self.assertEqual(planner.counters.fast_point_hits, 1)
 
     def test_vertex_reservation_can_force_wait(self):
         reservations = ReservationTable(0)
@@ -38,6 +41,8 @@ class SpaceTimeAStarTests(unittest.TestCase):
         path = planner.find_path((1, 1), 0, (3, 1), owner=0)
         self.assertIsNotNone(path)
         self.assertNotEqual(path[1], ((2, 1), 1))
+        self.assertEqual(planner.counters.fast_point_hits, 0)
+        self.assertGreater(planner.counters.expansions, 0)
 
     def test_reverse_edge_swap_is_avoided(self):
         reservations = ReservationTable(0)
@@ -73,6 +78,7 @@ class SpaceTimeAStarTests(unittest.TestCase):
         planner = SpaceTimeAStar(self.make_geometry(), ReservationTable(0), path_horizon=20)
         path = planner.find_path((1, 1), 0, (2, 1), owner=0, min_goal_time=4)
         self.assertEqual(path[-1], ((2, 1), 4))
+        self.assertEqual(planner.counters.fast_point_hits, 1)
 
     def test_goal_hold_requires_future_occupancy(self):
         reservations = ReservationTable(0)
@@ -81,6 +87,25 @@ class SpaceTimeAStarTests(unittest.TestCase):
         path = planner.find_path((1, 1), 0, (2, 1), owner=0, goal_hold_steps=1)
         self.assertIsNotNone(path)
         self.assertGreaterEqual(path[-1][1], 3)
+
+    def test_per_call_expansion_cap_is_recorded_with_context(self):
+        reservations = ReservationTable(0)
+        reservations.reserve_pose([(2, 1)], 1, 9)
+        planner = SpaceTimeAStar(
+            self.make_geometry(), reservations, path_horizon=20, max_expansions=100
+        )
+        path = planner.find_path(
+            (1, 1),
+            0,
+            (3, 1),
+            owner=0,
+            max_expansions=1,
+            context="candidate-order-7",
+        )
+        self.assertIsNone(path)
+        self.assertEqual(planner.counters.capped_calls, 1)
+        self.assertEqual(planner.counters.max_call_expansions, 2)
+        self.assertEqual(planner.counters.worst_context, "candidate-order-7")
 
     def test_find_path_to_row_keeps_nearest_x_when_clear(self):
         planner = SpaceTimeAStar(self.make_geometry(), ReservationTable(0), path_horizon=20)
