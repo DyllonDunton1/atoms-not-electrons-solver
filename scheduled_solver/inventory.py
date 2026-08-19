@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, Iterable, List, Mapping, Sequence
+from typing import Dict, Iterable, List, Sequence
 
 from .models import InventoryEvent, PalletSpec
 
@@ -58,6 +58,28 @@ class InventoryTimeline:
                 else:
                     raise ValueError(f"Unknown inventory event {event.kind!r}")
         return True
+
+    def pick_is_feasible(
+        self,
+        pallet_id: int,
+        timestep: int,
+        amount: int,
+        robot_id: int,
+        local_events: Iterable[InventoryEvent] = (),
+    ) -> bool:
+        """Return whether a new pick preserves every earlier committed promise.
+
+        A later-planned robot may consume stock before an already committed
+        service only when the remaining inventory timeline still satisfies all
+        committed future picks.  Committed refill events naturally separate
+        inventory epochs because they reset the pallet to capacity.
+        """
+        if pallet_id not in self._capacity:
+            raise KeyError(pallet_id)
+        if amount <= 0:
+            raise ValueError("pick amount must be positive")
+        candidate = InventoryEvent(timestep, pallet_id, "pick", amount, robot_id)
+        return self.events_are_feasible(list(local_events) + [candidate])
 
     def commit(self, events: Iterable[InventoryEvent]) -> None:
         event_list = list(events)
