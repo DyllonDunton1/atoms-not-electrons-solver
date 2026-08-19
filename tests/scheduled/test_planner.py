@@ -22,6 +22,7 @@ class PlannerTests(unittest.TestCase):
         beam_width=4,
         candidate_width=8,
         padding=0,
+        candidate_max_path_expansions=20_000,
     ):
         geometry = build_geometry(pallets, require_24_columns=False)
         reservations = ReservationTable(padding)
@@ -32,6 +33,7 @@ class PlannerTests(unittest.TestCase):
             reservation_padding=padding,
             path_horizon=256,
             max_path_expansions=100_000,
+            candidate_max_path_expansions=candidate_max_path_expansions,
             max_beam_depth=12,
             require_24_columns=False,
         )
@@ -208,7 +210,20 @@ class PlannerTests(unittest.TestCase):
         self.assertTrue(schedule.actions)
         self.assertGreater(stats.candidate_expansions_skipped, 0)
 
-    def test_planner_reports_astar_activity(self):
+    def test_candidate_astar_budget_is_separate_from_completion_budget(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 5),
+            PalletSpec(1, (11, 7), 1, 5),
+        )
+        planner, _, _, _ = self.make_planner(
+            pallets,
+            beam_width=1,
+            candidate_max_path_expansions=17,
+        )
+        self.assertEqual(planner.config.candidate_max_path_expansions, 17)
+        self.assertEqual(planner.config.max_path_expansions, 100_000)
+
+    def test_planner_reports_astar_activity_and_fast_paths(self):
         pallets = (
             PalletSpec(0, (10, 7), 0, 5),
             PalletSpec(1, (11, 7), 1, 5),
@@ -216,9 +231,11 @@ class PlannerTests(unittest.TestCase):
         planner, _, _, stats = self.make_planner(pallets, beam_width=2)
         planner.plan_order(0, OrderSpec(0, (0,)), (9, 10), 0)
         self.assertGreater(stats.astar_calls, 0)
-        self.assertGreater(stats.astar_expansions, 0)
+        self.assertGreater(stats.astar_expansions + stats.point_fast_path_hits + stats.row_fast_path_hits, 0)
         self.assertGreaterEqual(stats.astar_seconds, 0.0)
         self.assertGreaterEqual(stats.candidate_seconds, 0.0)
+        self.assertGreaterEqual(stats.astar_capped_calls, 0)
+        self.assertGreaterEqual(stats.astar_max_call_seconds, 0.0)
 
 
 if __name__ == "__main__":
