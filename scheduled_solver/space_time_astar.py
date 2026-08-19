@@ -20,6 +20,7 @@ from .reservations import Edge, ReservationTable
 class AStarCounters:
     calls: int = 0
     expansions: int = 0
+    fast_row_hits: int = 0
 
 
 class SpaceTimeAStar:
@@ -159,6 +160,60 @@ class SpaceTimeAStar:
                 heapq.heappush(heap, (new_g + h, new_g, serial, target, next_time))
         return None
 
+    def _direct_row_path(
+        self,
+        start: Position,
+        start_time: int,
+        row: int,
+        *,
+        owner: int,
+        footprint_offsets: FrozenSet[Offset],
+        static_exemptions: Mapping[Offset, Position],
+        goal_hold_steps: int,
+        goal_hold_until: Optional[int],
+    ) -> Optional[List[Tuple[Position, int]]]:
+        """Return the vertical shortest path when it is already time-valid."""
+        x, y = start
+        step = 0 if y == row else (1 if row > y else -1)
+        position = start
+        timestep = start_time
+        path: List[Tuple[Position, int]] = [(position, timestep)]
+
+        while position[1] != row:
+            target = (x, position[1] + step)
+            next_time = timestep + 1
+            if not self._pose_valid(
+                target,
+                next_time,
+                footprint_offsets,
+                static_exemptions,
+                owner,
+            ):
+                return None
+            if not self.reservations.edge_reservation_is_free(
+                self._edges(position, target, footprint_offsets),
+                timestep,
+                owner,
+            ):
+                return None
+            position = target
+            timestep = next_time
+            path.append((position, timestep))
+
+        hold_steps = goal_hold_steps
+        if goal_hold_until is not None and goal_hold_until > timestep:
+            hold_steps = max(hold_steps, goal_hold_until - timestep)
+        if not self._goal_hold_valid(
+            position,
+            timestep,
+            hold_steps,
+            footprint_offsets,
+            static_exemptions,
+            owner,
+        ):
+            return None
+        return path
+
     def find_path_to_row(
         self,
         start: Position,
@@ -173,13 +228,26 @@ class SpaceTimeAStar:
     ) -> Optional[List[Tuple[Position, int]]]:
         """Return the earliest reservation-valid arrival anywhere on ``row``.
 
-        Because every row cell shares the same admissible vertical-distance
-        heuristic, the first accepted row state is the minimum-time reachable
-        row position.  ``goal_hold_until`` is used for fulfillment: the chosen
-        endpoint must remain safe through every already-committed future
-        schedule, after which a terminal hold protects it from later planners.
+        A clear vertical path is already a globally shortest route to the row,
+        so validate and return it before constructing a space-time search.  If
+        anything blocks that route or its requested terminal hold, fall back to
+        the complete A* search.
         """
         self.counters.calls += 1
+        direct = self._direct_row_path(
+            start,
+            start_time,
+            row,
+            owner=owner,
+            footprint_offsets=footprint_offsets,
+            static_exemptions=static_exemptions,
+            goal_hold_steps=goal_hold_steps,
+            goal_hold_until=goal_hold_until,
+        )
+        if direct is not None:
+            self.counters.fast_row_hits += 1
+            return direct
+
         max_time = start_time + self.path_horizon
         start_state = (start, start_time)
         heap: List[Tuple[int, int, int, Position, int]] = []
