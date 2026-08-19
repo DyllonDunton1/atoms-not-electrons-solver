@@ -90,6 +90,8 @@ class SpaceTimeAStarTests(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertEqual(path[-1][0], (4, 7))
         self.assertEqual(path[-1][1], 3)
+        self.assertEqual(planner.counters.fast_row_hits, 1)
+        self.assertEqual(planner.counters.expansions, 0)
 
     def test_find_path_to_row_uses_nearest_available_row_cell(self):
         geometry = self.make_geometry({(4, 7)})
@@ -100,6 +102,8 @@ class SpaceTimeAStarTests(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertIn(path[-1][0], {(3, 7), (5, 7)})
         self.assertEqual(path[-1][1], 4)
+        self.assertEqual(planner.counters.fast_row_hits, 0)
+        self.assertGreater(planner.counters.expansions, 0)
 
     def test_row_goal_can_require_safety_through_future_reservations(self):
         reservations = ReservationTable(0)
@@ -115,6 +119,7 @@ class SpaceTimeAStarTests(unittest.TestCase):
         )
         self.assertIsNotNone(path)
         self.assertNotEqual(path[-1][0], (4, 7))
+        self.assertEqual(planner.counters.fast_row_hits, 0)
 
 
 if __name__ == "__main__":
