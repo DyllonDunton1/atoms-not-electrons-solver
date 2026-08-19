@@ -223,6 +223,27 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(planner.config.candidate_max_path_expansions, 17)
         self.assertEqual(planner.config.max_path_expansions, 100_000)
 
+    def test_candidate_cap_has_full_budget_rescue_if_all_candidates_are_capped(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 5),
+            PalletSpec(1, (11, 7), 1, 5),
+        )
+        planner, reservations, _, stats = self.make_planner(
+            pallets,
+            beam_width=1,
+            candidate_width=1,
+            candidate_max_path_expansions=1,
+        )
+        # The cached straight path to the x=9 service lane is blocked at t=1.
+        # The capped candidate A* cannot get past its first expansion, so both
+        # directed candidates fail cheaply. The full-budget rescue then finds
+        # the valid wait/detour and keeps the order schedulable.
+        reservations.reserve_pose([(9, 9)], 1, 9)
+        schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 10), 0)
+        self.assertTrue(schedule.actions)
+        self.assertGreater(stats.astar_capped_calls, 0)
+        self.assertGreater(stats.candidate_full_budget_rescues, 0)
+
     def test_planner_reports_astar_activity_and_fast_paths(self):
         pallets = (
             PalletSpec(0, (10, 7), 0, 5),
@@ -231,7 +252,12 @@ class PlannerTests(unittest.TestCase):
         planner, _, _, stats = self.make_planner(pallets, beam_width=2)
         planner.plan_order(0, OrderSpec(0, (0,)), (9, 10), 0)
         self.assertGreater(stats.astar_calls, 0)
-        self.assertGreater(stats.astar_expansions + stats.point_fast_path_hits + stats.row_fast_path_hits, 0)
+        self.assertGreater(
+            stats.astar_expansions
+            + stats.point_fast_path_hits
+            + stats.row_fast_path_hits,
+            0,
+        )
         self.assertGreaterEqual(stats.astar_seconds, 0.0)
         self.assertGreaterEqual(stats.candidate_seconds, 0.0)
         self.assertGreaterEqual(stats.astar_capped_calls, 0)
