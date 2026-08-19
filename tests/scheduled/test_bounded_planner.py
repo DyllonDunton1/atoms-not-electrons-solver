@@ -90,7 +90,10 @@ class BudgetAwarePlannerTests(unittest.TestCase):
         def fake_plan(base_self, *args, **kwargs):
             budgets_seen.append(planner._force_full_order_budget)
             if len(budgets_seen) == 1:
-                raise RuntimeError("capped attempt failed")
+                raise RuntimeError(
+                    "Full-horizon beam search could not schedule order 28 "
+                    "for robot 0 from t=1592"
+                )
             return sentinel
 
         with patch.object(FullHorizonBeamPlanner, "plan_order", new=fake_plan):
@@ -100,6 +103,18 @@ class BudgetAwarePlannerTests(unittest.TestCase):
         self.assertEqual(budgets_seen, [False, True])
         self.assertEqual(stats.order_full_budget_rescues, 1)
         self.assertFalse(planner._force_full_order_budget)
+
+    def test_unrelated_runtime_error_is_not_hidden_by_budget_retry(self):
+        planner, stats = self.make_planner()
+
+        def fake_plan(base_self, *args, **kwargs):
+            raise RuntimeError("unexpected invariant failure")
+
+        with patch.object(FullHorizonBeamPlanner, "plan_order", new=fake_plan):
+            with self.assertRaisesRegex(RuntimeError, "unexpected invariant failure"):
+                planner.plan_order(0, object(), (0, 0), 0)
+
+        self.assertEqual(stats.order_full_budget_rescues, 0)
 
 
 if __name__ == "__main__":
