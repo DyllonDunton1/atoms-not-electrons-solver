@@ -1,9 +1,9 @@
-"""Time-expanded cell, edge, and pallet reservations."""
+"""Time-expanded cell, edge, pallet, and terminal reservations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import PalletReservation, Position
 
@@ -34,6 +34,11 @@ class ReservationTable:
         self._edges: Dict[int, Dict[Edge, int]] = {}
         self._pallets: Dict[int, List[_StoredPalletInterval]] = {}
         self._permanent_vertices: Dict[Position, int] = {}
+        # A terminal hold begins only when a robot finishes its currently
+        # committed schedule.  Unlike the old fixed parking cells, this lets a
+        # robot fulfill at the closest legal point on y=0 while still making
+        # its idle post-order occupancy visible to later planners.
+        self._terminal_vertices: Dict[int, Tuple[Position, int]] = {}
 
     def _times(self, timestep: int) -> range:
         return range(timestep - self.padding, timestep + self.padding + 1)
@@ -46,10 +51,60 @@ class ReservationTable:
             )
         self._permanent_vertices[position] = owner
 
+    def _terminal_owner(self, position: Position, timestep: int) -> Optional[int]:
+        for robot_id, (held_position, start_timestep) in self._terminal_vertices.items():
+            if held_position == position and timestep >= start_timestep:
+                return robot_id
+        return None
+
+    def terminal_hold(self, owner: int) -> Optional[Tuple[Position, int]]:
+        """Return the owner's current indefinite post-schedule hold, if any."""
+        return self._terminal_vertices.get(owner)
+
+    def terminal_hold_is_free(
+        self,
+        position: Position,
+        start_timestep: int,
+        owner: Optional[int] = None,
+    ) -> bool:
+        """Return whether ``position`` can be occupied indefinitely from start.
+
+        Finite reservations are already stored with their configured time
+        padding, so scanning those buckets from ``start_timestep`` onward also
+        respects the safety margin.  Existing terminal holds are indefinite and
+        therefore conflict whenever another owner holds the same cell.
+        """
+        permanent = self._permanent_vertices.get(position)
+        if permanent not in (None, owner):
+            return False
+
+        for other_id, (other_position, _) in self._terminal_vertices.items():
+            if other_id != owner and other_position == position:
+                return False
+
+        for timestep, reservations in self._vertices.items():
+            if timestep < start_timestep:
+                continue
+            if reservations.get(position) not in (None, owner):
+                return False
+        return True
+
+    def set_terminal_hold(self, position: Position, start_timestep: int, owner: int) -> None:
+        """Replace ``owner``'s old idle hold with a new one after this schedule."""
+        if not self.terminal_hold_is_free(position, start_timestep, owner):
+            raise ReservationConflict(
+                f"Terminal cell {position} from t={start_timestep} conflicts with "
+                "an existing reservation"
+            )
+        self._terminal_vertices[owner] = (position, start_timestep)
+
     def vertex_owner(self, position: Position, timestep: int) -> Optional[int]:
         permanent = self._permanent_vertices.get(position)
         if permanent is not None:
             return permanent
+        terminal = self._terminal_owner(position, timestep)
+        if terminal is not None:
+            return terminal
         return self._vertices.get(timestep, {}).get(position)
 
     def vertex_is_free(
@@ -62,6 +117,9 @@ class ReservationTable:
         for position in positions:
             permanent = self._permanent_vertices.get(position)
             if permanent not in (None, owner):
+                return False
+            terminal = self._terminal_owner(position, timestep)
+            if terminal not in (None, owner):
                 return False
             if reservations.get(position) not in (None, owner):
                 return False
@@ -119,6 +177,11 @@ class ReservationTable:
                 if existing not in (None, owner):
                     raise ReservationConflict(
                         f"Cell {cell} at t={time} already reserved by robot {existing}"
+                    )
+                terminal = self._terminal_owner(cell, time)
+                if terminal not in (None, owner):
+                    raise ReservationConflict(
+                        f"Cell {cell} at t={time} is held by idle robot {terminal}"
                     )
             for cell in cells:
                 bucket[cell] = owner
@@ -199,6 +262,10 @@ class ReservationTable:
         )
 
     def reservation_horizon(self) -> int:
+        # Terminal holds are deliberately omitted: they are indefinite.  This
+        # method answers how far existing finite schedules extend so a newly
+        # finishing robot can prove its chosen row cell is safe through all
+        # already-committed future movement.
         times = list(self._vertices) + list(self._edges)
         for intervals in self._pallets.values():
             times.extend(interval.end for interval in intervals)
