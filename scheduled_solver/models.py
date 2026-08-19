@@ -138,6 +138,8 @@ class PlannerStats:
     compaction_seconds: float = 0.0
     candidate_expansions_skipped: int = 0
     candidate_full_budget_rescues: int = 0
+    capped_candidate_rejections: int = 0
+    order_full_budget_rescues: int = 0
     wait_steps: int = 0
     refill_trips: int = 0
     failed_expansions: int = 0
