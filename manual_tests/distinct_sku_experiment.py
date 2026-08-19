@@ -1,10 +1,10 @@
 """Run the distinct-SKU aisle-scoring experiment on BIG_ORDER.
 
-This script intentionally leaves the production aisle planner unchanged.  It
+This script intentionally leaves the production aisle planner unchanged. It
 swaps in an experimental planner that scores aisle utility by the number of
 distinct required SKUs available in the aisle instead of total item quantity.
-It always writes a full diagnostic trace and automatically runs the streaming
-trace analyzer after the solution is generated.
+It writes a diagnostic trace and automatically runs the streaming trace
+analyzer after the solution is generated.
 """
 
 from argparse import ArgumentParser
@@ -141,14 +141,26 @@ def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("--robots", type=int, default=5, choices=range(1, 6))
     parser.add_argument("--orders", type=int, default=1000, choices=range(1, 1001))
+    parser.add_argument(
+        "--stop-timestep",
+        type=int,
+        default=None,
+        help="Stop generation at this world timestep and write partial outputs.",
+    )
     args = parser.parse_args()
+
+    if args.stop_timestep is not None and args.stop_timestep <= 0:
+        parser.error("--stop-timestep must be positive")
 
     robot_ids = list(range(args.robots))
     order_ids = list(range(args.orders))
 
     # Deliberately use a different stem from the known-good aisle_v1 output so
     # this experiment can never overwrite the current working solution files.
-    output_stem = f"aisle_v1_distinct_skus_{args.robots}r_{args.orders}o"
+    suffix = f"_{args.stop_timestep}t" if args.stop_timestep is not None else ""
+    output_stem = (
+        f"aisle_v1_distinct_skus_{args.robots}r_{args.orders}o{suffix}"
+    )
     outputs_dir = REPO_ROOT / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output_path = outputs_dir / f"{output_stem}.txt"
@@ -156,31 +168,46 @@ def main() -> None:
     trace_path = outputs_dir / f"{output_stem}_trace.jsonl"
 
     world = WorldState(parse_problem(BIG_ORDER_PATH))
+    solver_kwargs = {}
+    if args.stop_timestep is not None:
+        solver_kwargs["max_timesteps"] = args.stop_timestep
+
     solver = DistinctSkuDiagnosticSolver(
         world,
         robot_ids=robot_ids,
         order_ids=order_ids,
         trace_path=trace_path,
         trace_start=0,
+        **solver_kwargs,
     )
 
     label = (
         f"distinct-SKU scoring / {args.robots} robots / "
         f"{args.orders} orders / full trace"
     )
+    if args.stop_timestep is not None:
+        label += f" / stop t={args.stop_timestep}"
 
     try:
-        actions = solve_with_progress(solver, label)
+        actions = solve_with_progress(solver, label, args.stop_timestep)
     finally:
         solver.close_trace()
 
     print("Generation complete. Replaying from fresh input...", flush=True)
     replay_problem = parse_problem(BIG_ORDER_PATH)
     replay_world = WorldState(replay_problem)
-    Simulator(replay_world).run(actions)
+    replay_simulator = Simulator(replay_world)
+    replay_simulator.run(actions)
+
+    if args.stop_timestep is not None:
+        while replay_world.timestep < args.stop_timestep:
+            replay_simulator.step([])
+
     replay_world.validate()
 
-    if not all(replay_world.orders[i].fulfilled for i in order_ids):
+    if args.stop_timestep is None and not all(
+        replay_world.orders[i].fulfilled for i in order_ids
+    ):
         raise RuntimeError("Fresh replay did not fulfill every requested order")
 
     action_keys = [(action.timestep, action.robot_id) for action in actions]
