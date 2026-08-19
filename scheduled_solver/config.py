@@ -12,7 +12,7 @@ class SchedulerConfig:
     reservation_padding: int = 1
     path_horizon: int = 512
     max_path_expansions: int = 250_000
-    candidate_max_path_expansions: int = 20_000
+    candidate_max_path_expansions: int = 30_000
     max_beam_depth: int = 64
     require_24_columns: bool = True
 
