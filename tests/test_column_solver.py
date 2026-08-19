@@ -102,7 +102,7 @@ class TestDirectedColumnPlanner(unittest.TestCase):
         self.assertEqual(state.previous_aisle_id, active_column)
         self.assertTrue(state.remaining_by_sku)
 
-    def test_normal_column_activation_ignores_persistent_adjacency(self):
+    def test_far_column_activation_ignores_persistent_adjacency(self):
         solver = ColumnAwareSolver(
             self.world,
             robot_ids=[0],
@@ -114,12 +114,64 @@ class TestDirectedColumnPlanner(unittest.TestCase):
 
         stop = solver._current_stop(0)
         self.assertIsNotNone(stop)
+        robot = solver.world.robots[0]
+        self.assertGreater(
+            abs(robot.position[0] - stop.pickup[0])
+            + abs(robot.position[1] - stop.pickup[1]),
+            1,
+        )
         solver._persistent_priority_blocked_pallet_ids = lambda robot_id: {
             stop.pallet_id
         }
 
         self.assertTrue(solver._activate_current_stop(0))
         self.assertEqual(solver.pallet_claims.get(stop.pallet_id), 0)
+
+    def test_local_column_activation_defers_persistent_adjacency(self):
+        solver = ColumnAwareSolver(
+            self.world,
+            robot_ids=[0],
+            order_ids=[0],
+            max_timesteps=1000,
+        )
+        solver._assign_free_robots()
+        self.assertTrue(solver._select_new_aisle(0))
+
+        stop = solver._current_stop(0)
+        self.assertIsNotNone(stop)
+        solver.world.robots[0].position = (stop.pickup[0], stop.pickup[1] + 1)
+        solver._persistent_priority_blocked_pallet_ids = lambda robot_id: {
+            stop.pallet_id
+        }
+
+        self.assertFalse(solver._activate_current_stop(0))
+        self.assertNotEqual(solver.pallet_claims.get(stop.pallet_id), 0)
+        self.assertIsNone(solver.states[0].pallet_id)
+
+    def test_claimed_stop_is_deferred_when_blocker_persists_locally(self):
+        solver = ColumnAwareSolver(
+            self.world,
+            robot_ids=[0],
+            order_ids=[0],
+            max_timesteps=1000,
+        )
+        solver._assign_free_robots()
+        self.assertTrue(solver._select_new_aisle(0))
+
+        stop = solver._current_stop(0)
+        self.assertIsNotNone(stop)
+        solver._persistent_priority_blocked_pallet_ids = lambda robot_id: set()
+        self.assertTrue(solver._activate_current_stop(0))
+        self.assertEqual(solver.pallet_claims.get(stop.pallet_id), 0)
+
+        solver.world.robots[0].position = (stop.pickup[0], stop.pickup[1] + 1)
+        solver._persistent_priority_blocked_pallet_ids = lambda robot_id: {
+            stop.pallet_id
+        }
+        solver._replan_active_aisle(0)
+
+        self.assertNotEqual(solver.pallet_claims.get(stop.pallet_id), 0)
+        self.assertIsNone(solver.states[0].pallet_id)
 
     def test_previous_column_fallback_alone_applies_persistent_adjacency(self):
         solver = ColumnAwareSolver(
