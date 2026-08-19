@@ -36,6 +36,17 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.timeline.commit(candidate)
 
+    def test_pick_feasibility_exposes_only_surplus_before_committed_pick(self):
+        self.timeline.commit([InventoryEvent(10, 0, "pick", 3, 0)])
+        self.assertTrue(self.timeline.pick_is_feasible(0, 2, 2, 1))
+        self.assertFalse(self.timeline.pick_is_feasible(0, 2, 3, 1))
+
+    def test_local_picks_also_reduce_surplus_available_to_branch(self):
+        self.timeline.commit([InventoryEvent(10, 0, "pick", 2, 0)])
+        local = [InventoryEvent(2, 0, "pick", 2, 1)]
+        self.assertTrue(self.timeline.pick_is_feasible(0, 3, 1, 1, local))
+        self.assertFalse(self.timeline.pick_is_feasible(0, 3, 2, 1, local))
+
     def test_earlier_refill_can_preserve_future_stock(self):
         self.timeline.commit([InventoryEvent(10, 0, "pick", 5, 0)])
         candidate = [
@@ -43,6 +54,15 @@ class InventoryTests(unittest.TestCase):
             InventoryEvent(5, 0, "refill", 0, 1),
         ]
         self.assertTrue(self.timeline.events_are_feasible(candidate))
+
+    def test_committed_refill_starts_a_new_inventory_epoch(self):
+        self.timeline.commit(
+            [
+                InventoryEvent(5, 0, "refill", 0, 0),
+                InventoryEvent(10, 0, "pick", 5, 0),
+            ]
+        )
+        self.assertTrue(self.timeline.pick_is_feasible(0, 2, 5, 1))
 
     def test_negative_stock_is_rejected(self):
         events = [InventoryEvent(i, 0, "pick", 1, 0) for i in range(6)]
