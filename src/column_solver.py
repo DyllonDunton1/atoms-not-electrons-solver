@@ -451,13 +451,71 @@ class ColumnAwareSolver(AisleAwareSolver):
         super().__init__(*args, **kwargs)
         self.aisle_planner = DirectedColumnPlanner(self.world)
 
+    def _select_new_aisle(self, robot_id: int) -> bool:
+        """Choose a column, applying adjacency only to previous-column fallback.
+
+        Normal 48-route selection intentionally ignores transient persistent
+        adjacency because a robot may be many timesteps away from the chosen
+        column. Hard unavailability (claims, docking, moved pallets) still
+        applies everywhere. If no non-previous column is useful, the fallback
+        may reconsider the previous column, but pallets there that are still
+        persistently adjacent to a higher-priority robot stay unavailable for
+        this timestep. That turns immediate same-column reselection into a wait
+        instead of an internal state-machine loop.
+        """
+        state = self.states[robot_id]
+        robot = self.world.robots[robot_id]
+        congestion = self._aisle_congestion(robot_id)
+        unavailable = self._base_unavailable_pallet_ids(robot_id)
+        blocked = self._permanent_robot_cells(robot_id)
+        previous_column_id = state.previous_aisle_id
+        excluded = [] if previous_column_id is None else [previous_column_id]
+
+        plan = self.aisle_planner.choose_plan(
+            robot.position,
+            state.remaining_by_sku,
+            congestion_by_aisle=congestion,
+            unavailable_pallet_ids=unavailable,
+            blocked=blocked,
+            excluded_aisle_ids=excluded,
+        )
+
+        if plan is None and previous_column_id is not None:
+            previous_pallet_ids = set(
+                self.aisle_planner.layout.columns[previous_column_id].pallet_ids
+            )
+            previous_adjacency_blockers = (
+                self._persistent_priority_blocked_pallet_ids(robot_id)
+                & previous_pallet_ids
+            )
+            fallback_unavailable = unavailable | previous_adjacency_blockers
+            plan = self.aisle_planner.choose_plan(
+                robot.position,
+                state.remaining_by_sku,
+                congestion_by_aisle=congestion,
+                unavailable_pallet_ids=fallback_unavailable,
+                blocked=blocked,
+            )
+        if plan is None:
+            return False
+
+        state.active_aisle_id = plan.aisle_id
+        state.aisle_plan = plan
+        state.aisle_stop_index = 0
+        state.pallet_id = None
+        state.pickup = None
+        state.remaining = 0
+        state.deferred_pallet_ids.clear()
+        state.greedy_plan_timestep = None
+        return True
+
     def _extend_active_aisle_if_useful(self, robot_id: int) -> bool:
         """Never rescan/backtrack inside a completed column pass.
 
         Any still-required SKU is left to the next global 48-route decision.
-        The inherited previous-unit exclusion prevents immediate re-entry; its
-        existing fallback may choose the same column only when no other useful
-        column exists, which is the intentional "must backtrack" case.
+        The previous-unit exclusion prevents immediate re-entry; the fallback
+        may choose the same column only when no other useful column exists and
+        its useful pallets are no longer persistently adjacency-blocked.
         """
         return False
 
@@ -490,7 +548,13 @@ class ColumnAwareSolver(AisleAwareSolver):
         return state.aisle_plan is not None
 
     def _activate_current_stop(self, robot_id: int) -> bool:
-        """Claim the current directed stop or defer it without reversing the pass."""
+        """Claim the current directed stop or defer hard-unavailable work.
+
+        Persistent adjacency is deliberately ignored once a non-previous column
+        has been selected. A far-away robot should not discard a good route just
+        because another robot happens to be beside the pallet now. Claims,
+        docking, and moved pallets remain hard exclusions.
+        """
         state = self.states[robot_id]
         stop = self._current_stop(robot_id)
         if stop is None:
@@ -503,9 +567,6 @@ class ColumnAwareSolver(AisleAwareSolver):
             return False
 
         unavailable = False
-        if stop.pallet_id in self._persistent_priority_blocked_pallet_ids(robot_id):
-            unavailable = True
-
         pallet = self.world.pallets[stop.pallet_id]
         claim = self.pallet_claims.get(stop.pallet_id)
         if claim is not None and claim != robot_id:
