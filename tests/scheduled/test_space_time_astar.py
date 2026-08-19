@@ -82,13 +82,39 @@ class SpaceTimeAStarTests(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertGreaterEqual(path[-1][1], 3)
 
-    def test_find_path_to_row(self):
+    def test_find_path_to_row_keeps_nearest_x_when_clear(self):
         planner = SpaceTimeAStar(self.make_geometry(), ReservationTable(0), path_horizon=20)
         path = planner.find_path_to_row(
             (4, 4), 0, 7, owner=0, footprint_offsets=frozenset({(0, 0)})
         )
         self.assertIsNotNone(path)
-        self.assertEqual(path[-1][0][1], 7)
+        self.assertEqual(path[-1][0], (4, 7))
+        self.assertEqual(path[-1][1], 3)
+
+    def test_find_path_to_row_uses_nearest_available_row_cell(self):
+        geometry = self.make_geometry({(4, 7)})
+        planner = SpaceTimeAStar(geometry, ReservationTable(0), path_horizon=20)
+        path = planner.find_path_to_row(
+            (4, 4), 0, 7, owner=0, footprint_offsets=frozenset({(0, 0)})
+        )
+        self.assertIsNotNone(path)
+        self.assertIn(path[-1][0], {(3, 7), (5, 7)})
+        self.assertEqual(path[-1][1], 4)
+
+    def test_row_goal_can_require_safety_through_future_reservations(self):
+        reservations = ReservationTable(0)
+        reservations.reserve_pose([(4, 7)], 10, 9)
+        planner = SpaceTimeAStar(self.make_geometry(), reservations, path_horizon=20)
+        path = planner.find_path_to_row(
+            (4, 4),
+            0,
+            7,
+            owner=0,
+            footprint_offsets=frozenset({(0, 0)}),
+            goal_hold_until=10,
+        )
+        self.assertIsNotNone(path)
+        self.assertNotEqual(path[-1][0], (4, 7))
 
 
 if __name__ == "__main__":
