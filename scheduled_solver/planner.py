@@ -451,14 +451,20 @@ class FullHorizonBeamPlanner:
     ) -> Optional[CommittedOrderSchedule]:
         if state.remaining:
             return None
-        fulfillment_goal = (robot_id, self.geometry.fulfillment_y)
-        path = self.astar.find_path(
+
+        # Fulfillment is allowed from any x on y=0.  Pick the earliest reachable
+        # row cell rather than forcing robots into the old robot-id parking cells.
+        # The selected endpoint must also remain safe through every finite
+        # reservation already committed; later planners will see it as an
+        # indefinite terminal hold until this robot receives its next order.
+        path = self.astar.find_path_to_row(
             state.position,
             state.timestep,
-            fulfillment_goal,
+            self.geometry.fulfillment_y,
             owner=robot_id,
             footprint_offsets=SINGLE,
             goal_hold_steps=1,
+            goal_hold_until=self.reservations.reservation_horizon(),
         )
         if path is None:
             return None
