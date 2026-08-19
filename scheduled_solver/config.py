@@ -8,6 +8,7 @@ class SchedulerConfig:
     """Tuning knobs for full-horizon prioritized scheduling."""
 
     beam_width: int = 8
+    candidate_width: int = 8
     reservation_padding: int = 1
     path_horizon: int = 512
     max_path_expansions: int = 250_000
@@ -17,6 +18,8 @@ class SchedulerConfig:
     def __post_init__(self) -> None:
         if self.beam_width <= 0:
             raise ValueError("beam_width must be positive")
+        if self.candidate_width <= 0:
+            raise ValueError("candidate_width must be positive")
         if self.reservation_padding < 0:
             raise ValueError("reservation_padding must be nonnegative")
         if self.path_horizon <= 0:
