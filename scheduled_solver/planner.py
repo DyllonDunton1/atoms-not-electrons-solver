@@ -222,6 +222,7 @@ class FullHorizonBeamPlanner:
         exemptions: Mapping[Offset, Position],
         *,
         context: str,
+        candidate_budget: bool = True,
     ) -> Optional[_BeamState]:
         started = time.perf_counter()
         try:
@@ -232,7 +233,11 @@ class FullHorizonBeamPlanner:
                 owner=robot_id,
                 footprint_offsets=footprint_offsets,
                 static_exemptions=exemptions,
-                max_expansions=self.config.candidate_max_path_expansions,
+                max_expansions=(
+                    self.config.candidate_max_path_expansions
+                    if candidate_budget
+                    else self.config.max_path_expansions
+                ),
                 context=context,
             )
         finally:
@@ -266,6 +271,7 @@ class FullHorizonBeamPlanner:
         order_id: int,
         min_goal_time: Optional[int],
         path_context: str,
+        candidate_budget: bool,
     ) -> Optional[_BeamState]:
         state = self._plan_to(
             base,
@@ -274,6 +280,7 @@ class FullHorizonBeamPlanner:
             min_goal_time=min_goal_time,
             goal_hold_steps=1,
             context=f"{path_context} pallet={pallet.pallet_id} approach",
+            candidate_budget=candidate_budget,
         )
         if state is None:
             return None
@@ -369,6 +376,7 @@ class FullHorizonBeamPlanner:
                 carried_offsets,
                 exemptions,
                 context=f"{path_context} pallet={pallet.pallet_id} refill-out",
+                candidate_budget=candidate_budget,
             )
             if to_refill is None:
                 return None
@@ -392,6 +400,7 @@ class FullHorizonBeamPlanner:
                 exemptions=exemptions,
                 goal_hold_steps=1,
                 context=f"{path_context} pallet={pallet.pallet_id} refill-return",
+                candidate_budget=candidate_budget,
             )
             if returned is None:
                 return None
@@ -453,6 +462,7 @@ class FullHorizonBeamPlanner:
         robot_id: int,
         order_id: int,
         path_context: str,
+        candidate_budget: bool,
     ) -> Optional[_BeamState]:
         min_goal_time: Optional[int] = None
         tried_goal_times = set()
@@ -467,6 +477,7 @@ class FullHorizonBeamPlanner:
                 order_id,
                 min_goal_time,
                 path_context,
+                candidate_budget,
             )
             if candidate is not None:
                 return candidate
@@ -494,6 +505,8 @@ class FullHorizonBeamPlanner:
         direction: str,
         robot_id: int,
         order_id: int,
+        *,
+        candidate_budget: bool = True,
     ) -> Optional[_BeamState]:
         remaining = state.remaining_map
         if not remaining:
@@ -508,8 +521,10 @@ class FullHorizonBeamPlanner:
         current = state
         serviced_skus = set()
         used_pallets: List[int] = []
+        budget_name = "candidate" if candidate_budget else "rescue"
         path_context = (
-            f"order={order_id} robot={robot_id} column={column.column_id} dir={direction}"
+            f"order={order_id} robot={robot_id} column={column.column_id} "
+            f"dir={direction} budget={budget_name}"
         )
 
         for pallet_id in ordered_ids:
@@ -526,6 +541,7 @@ class FullHorizonBeamPlanner:
                 robot_id,
                 order_id,
                 path_context,
+                candidate_budget,
             )
             if candidate is None:
                 continue
@@ -711,6 +727,34 @@ class FullHorizonBeamPlanner:
                 break
 
         self.stats.candidate_expansions_skipped += len(specs) - examined
+
+        # The low cap is a speed heuristic, not a correctness boundary. If all
+        # directed candidates fail under it, retry with the full path budget
+        # until one feasible branch is found.
+        if not generated:
+            for column, direction in specs:
+                candidate_started = time.perf_counter()
+                try:
+                    candidate = self._expand_column(
+                        state,
+                        column,
+                        direction,
+                        robot_id,
+                        order_id,
+                        candidate_budget=False,
+                    )
+                finally:
+                    self.stats.candidate_seconds += (
+                        time.perf_counter() - candidate_started
+                    )
+                if candidate is None:
+                    self.stats.failed_expansions += 1
+                    continue
+                self.stats.beam_generated += 1
+                self.stats.candidate_full_budget_rescues += 1
+                generated.append(candidate)
+                break
+
         return generated
 
     def _finish_order(
