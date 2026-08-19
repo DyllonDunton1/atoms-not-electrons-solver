@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from .config import SchedulerConfig
 from .geometry import DIRECTIONS, DOWN, UP, ServiceColumn, WarehouseGeometry
@@ -86,18 +86,20 @@ class FullHorizonBeamPlanner:
 
     @staticmethod
     def _remaining_tuple(remaining: Mapping[int, int]) -> Tuple[Tuple[int, int], ...]:
-        return tuple(sorted((sku, quantity) for sku, quantity in remaining.items() if quantity > 0))
+        return tuple(
+            sorted((sku, quantity) for sku, quantity in remaining.items() if quantity > 0)
+        )
 
     def _sync_astar_stats(self) -> None:
-        self.stats.astar_calls = self._astar_counters.calls
-        self.stats.astar_expansions = self._astar_counters.expansions
-        self.stats.row_fast_path_hits = self._astar_counters.fast_row_hits
-
-    def _pose_cells(self, pose: TimedPose) -> Tuple[Position, ...]:
-        return tuple(
-            (pose.center[0] + dx, pose.center[1] + dy)
-            for dx, dy in pose.footprint_offsets
-        )
+        counters = self._astar_counters
+        self.stats.astar_calls = counters.calls
+        self.stats.astar_expansions = counters.expansions
+        self.stats.astar_capped_calls = counters.capped_calls
+        self.stats.astar_max_call_expansions = counters.max_call_expansions
+        self.stats.astar_max_call_seconds = counters.max_call_seconds
+        self.stats.astar_worst_context = counters.worst_context
+        self.stats.row_fast_path_hits = counters.fast_row_hits
+        self.stats.point_fast_path_hits = counters.fast_point_hits
 
     def _append_path(
         self,
@@ -128,7 +130,13 @@ class FullHorizonBeamPlanner:
                     tuple(sorted(exemptions.items())),
                 )
             )
-        return replace(state, position=position, timestep=timestep, actions=tuple(actions), poses=tuple(poses))
+        return replace(
+            state,
+            position=position,
+            timestep=timestep,
+            actions=tuple(actions),
+            poses=tuple(poses),
+        )
 
     def _append_fixed(
         self,
@@ -148,7 +156,9 @@ class FullHorizonBeamPlanner:
         ):
             return None
         next_cells = self.geometry.footprint_cells(state.position, next_offsets)
-        if not self.reservations.vertex_reservation_is_free(next_cells, next_time, robot_id):
+        if not self.reservations.vertex_reservation_is_free(
+            next_cells, next_time, robot_id
+        ):
             return None
         action = Action(state.timestep, robot_id, action_type, target)
         pose = TimedPose(
@@ -174,6 +184,8 @@ class FullHorizonBeamPlanner:
         exemptions: Mapping[Offset, Position] = {},
         min_goal_time: Optional[int] = None,
         goal_hold_steps: int = 0,
+        context: str,
+        candidate_budget: bool = True,
     ) -> Optional[_BeamState]:
         started = time.perf_counter()
         try:
@@ -186,12 +198,20 @@ class FullHorizonBeamPlanner:
                 static_exemptions=exemptions,
                 min_goal_time=min_goal_time,
                 goal_hold_steps=goal_hold_steps,
+                max_expansions=(
+                    self.config.candidate_max_path_expansions
+                    if candidate_budget
+                    else self.config.max_path_expansions
+                ),
+                context=context,
             )
         finally:
             self.stats.astar_seconds += time.perf_counter() - started
         if path is None:
             return None
-        return self._append_path(state, path, robot_id, footprint_offsets, exemptions)
+        return self._append_path(
+            state, path, robot_id, footprint_offsets, exemptions
+        )
 
     def _plan_to_row(
         self,
@@ -200,6 +220,8 @@ class FullHorizonBeamPlanner:
         robot_id: int,
         footprint_offsets: FrozenSet[Offset],
         exemptions: Mapping[Offset, Position],
+        *,
+        context: str,
     ) -> Optional[_BeamState]:
         started = time.perf_counter()
         try:
@@ -210,12 +232,16 @@ class FullHorizonBeamPlanner:
                 owner=robot_id,
                 footprint_offsets=footprint_offsets,
                 static_exemptions=exemptions,
+                max_expansions=self.config.candidate_max_path_expansions,
+                context=context,
             )
         finally:
             self.stats.astar_seconds += time.perf_counter() - started
         if path is None:
             return None
-        return self._append_path(state, path, robot_id, footprint_offsets, exemptions)
+        return self._append_path(
+            state, path, robot_id, footprint_offsets, exemptions
+        )
 
     def _future_committed_pallet_intervals(
         self,
@@ -239,6 +265,7 @@ class FullHorizonBeamPlanner:
         robot_id: int,
         order_id: int,
         min_goal_time: Optional[int],
+        path_context: str,
     ) -> Optional[_BeamState]:
         state = self._plan_to(
             base,
@@ -246,6 +273,7 @@ class FullHorizonBeamPlanner:
             robot_id,
             min_goal_time=min_goal_time,
             goal_hold_steps=1,
+            context=f"{path_context} pallet={pallet.pallet_id} approach",
         )
         if state is None:
             return None
@@ -315,10 +343,8 @@ class FullHorizonBeamPlanner:
                 state.timestep,
                 robot_id,
             )
-
             if future_intervals:
                 return None
-
             if inventory_blocked:
                 return None
 
@@ -342,13 +368,20 @@ class FullHorizonBeamPlanner:
                 robot_id,
                 carried_offsets,
                 exemptions,
+                context=f"{path_context} pallet={pallet.pallet_id} refill-out",
             )
             if to_refill is None:
                 return None
             state = to_refill
             refill_event_time = state.timestep - 1
             local_events.append(
-                InventoryEvent(refill_event_time, pallet.pallet_id, "refill", 0, robot_id)
+                InventoryEvent(
+                    refill_event_time,
+                    pallet.pallet_id,
+                    "refill",
+                    0,
+                    robot_id,
+                )
             )
 
             returned = self._plan_to(
@@ -358,6 +391,7 @@ class FullHorizonBeamPlanner:
                 footprint_offsets=carried_offsets,
                 exemptions=exemptions,
                 goal_hold_steps=1,
+                context=f"{path_context} pallet={pallet.pallet_id} refill-return",
             )
             if returned is None:
                 return None
@@ -386,6 +420,7 @@ class FullHorizonBeamPlanner:
             self.stats.inventory_seconds += time.perf_counter() - inventory_started
         if not events_feasible:
             return None
+
         conflict = self.reservations.first_pallet_conflict(
             pallet.pallet_id,
             service_start,
@@ -417,6 +452,7 @@ class FullHorizonBeamPlanner:
         quantity: int,
         robot_id: int,
         order_id: int,
+        path_context: str,
     ) -> Optional[_BeamState]:
         min_goal_time: Optional[int] = None
         tried_goal_times = set()
@@ -430,6 +466,7 @@ class FullHorizonBeamPlanner:
                 robot_id,
                 order_id,
                 min_goal_time,
+                path_context,
             )
             if candidate is not None:
                 return candidate
@@ -471,6 +508,9 @@ class FullHorizonBeamPlanner:
         current = state
         serviced_skus = set()
         used_pallets: List[int] = []
+        path_context = (
+            f"order={order_id} robot={robot_id} column={column.column_id} dir={direction}"
+        )
 
         for pallet_id in ordered_ids:
             pallet = self.pallets[pallet_id]
@@ -485,6 +525,7 @@ class FullHorizonBeamPlanner:
                 quantity,
                 robot_id,
                 order_id,
+                path_context,
             )
             if candidate is None:
                 continue
@@ -524,7 +565,8 @@ class FullHorizonBeamPlanner:
         )
         remaining_picks = sum(remaining.values())
         to_fulfillment = min(
-            abs(pickup[1] - self.geometry.fulfillment_y) for pickup in useful_pickups
+            abs(pickup[1] - self.geometry.fulfillment_y)
+            for pickup in useful_pickups
         )
         return nearest + remaining_picks + to_fulfillment + 1
 
@@ -692,6 +734,8 @@ class FullHorizonBeamPlanner:
                 footprint_offsets=SINGLE,
                 goal_hold_steps=1,
                 goal_hold_until=self.reservations.reservation_horizon(),
+                max_expansions=self.config.max_path_expansions,
+                context=f"order={order_id} robot={robot_id} fulfill",
             )
         finally:
             self.stats.astar_seconds += time.perf_counter() - started
@@ -773,7 +817,9 @@ class FullHorizonBeamPlanner:
             if not next_states:
                 break
 
-            dominant: Dict[Tuple[Position, Tuple[Tuple[int, int], ...]], _BeamState] = {}
+            dominant: Dict[
+                Tuple[Position, Tuple[Tuple[int, int], ...]], _BeamState
+            ] = {}
             for candidate_state in next_states:
                 key = (candidate_state.position, candidate_state.remaining)
                 previous = dominant.get(key)
