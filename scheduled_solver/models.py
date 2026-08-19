@@ -127,7 +127,12 @@ class PlannerStats:
     astar_calls: int = 0
     astar_expansions: int = 0
     astar_seconds: float = 0.0
+    astar_capped_calls: int = 0
+    astar_max_call_expansions: int = 0
+    astar_max_call_seconds: float = 0.0
+    astar_worst_context: str = ""
     row_fast_path_hits: int = 0
+    point_fast_path_hits: int = 0
     inventory_seconds: float = 0.0
     candidate_seconds: float = 0.0
     compaction_seconds: float = 0.0
