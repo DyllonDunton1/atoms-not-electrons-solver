@@ -47,6 +47,17 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(self.timeline.pick_is_feasible(0, 3, 1, 1, local))
         self.assertFalse(self.timeline.pick_is_feasible(0, 3, 2, 1, local))
 
+    def test_pick_feasibility_ignores_unrelated_local_pallets(self):
+        timeline = InventoryTimeline(
+            [
+                PalletSpec(0, (10, 10), 2, 5),
+                PalletSpec(1, (11, 10), 3, 1),
+            ]
+        )
+        timeline.commit([InventoryEvent(10, 0, "pick", 3, 0)])
+        unrelated = [InventoryEvent(2, 1, "pick", 2, 1)]
+        self.assertTrue(timeline.pick_is_feasible(0, 2, 2, 1, unrelated))
+
     def test_earlier_refill_can_preserve_future_stock(self):
         self.timeline.commit([InventoryEvent(10, 0, "pick", 5, 0)])
         candidate = [
@@ -63,6 +74,34 @@ class InventoryTests(unittest.TestCase):
             ]
         )
         self.assertTrue(self.timeline.pick_is_feasible(0, 2, 5, 1))
+
+    def test_compaction_folds_past_events_and_keeps_future_promises(self):
+        self.timeline.commit(
+            [
+                InventoryEvent(1, 0, "pick", 2, 0),
+                InventoryEvent(5, 0, "refill", 0, 0),
+                InventoryEvent(7, 0, "pick", 1, 0),
+                InventoryEvent(10, 0, "pick", 2, 0),
+            ]
+        )
+        removed = self.timeline.compact_before(8)
+        self.assertEqual(removed, 3)
+        self.assertEqual([e.timestep for e in self.timeline.events_for(0)], [10])
+        self.assertEqual(self.timeline.stock_at(0, 8), 4)
+        self.assertEqual(self.timeline.stock_at(0, 11), 2)
+        self.assertTrue(self.timeline.pick_is_feasible(0, 8, 2, 1))
+        self.assertFalse(self.timeline.pick_is_feasible(0, 8, 3, 1))
+
+    def test_compaction_does_not_apply_event_at_frontier_early(self):
+        self.timeline.commit([InventoryEvent(8, 0, "pick", 1, 0)])
+        self.timeline.compact_before(8)
+        self.assertEqual(self.timeline.stock_at(0, 8), 5)
+        self.assertEqual(self.timeline.stock_at(0, 9), 4)
+
+    def test_compaction_frontier_cannot_move_backwards(self):
+        self.timeline.compact_before(5)
+        with self.assertRaises(ValueError):
+            self.timeline.compact_before(4)
 
     def test_negative_stock_is_rejected(self):
         events = [InventoryEvent(i, 0, "pick", 1, 0) for i in range(6)]
