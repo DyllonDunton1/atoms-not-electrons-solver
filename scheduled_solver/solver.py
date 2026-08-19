@@ -88,8 +88,6 @@ class ScheduledSolver:
         self.assignment: Dict[int, int] = {}
         self.actions: List[Action] = []
 
-        # Initial centers are real occupied cells. Every active robot starts
-        # with a one-state anchor; lower-priority first plans must leave room.
         for robot_id in self.active_robot_ids:
             self.reservations.reserve_pose(
                 [self.robot_states[robot_id].position],
@@ -133,9 +131,6 @@ class ScheduledSolver:
                     f"Pallet {pallet.pallet_id} conflicts before schedule commit"
                 )
 
-        # After FULFILL the robot remains at its chosen y=0 cell until this same
-        # robot receives another order.  Make sure that indefinite idle position
-        # does not collide with any already-committed future schedule.
         if not self.reservations.terminal_hold_is_free(
             schedule.end_position,
             schedule.finish_timestep,
@@ -206,6 +201,14 @@ class ScheduledSolver:
             state = self.robot_states[robot_id]
             if state.available_timestep != start_timestep:
                 raise RuntimeError("Robot availability heap became stale")
+
+            # start_timestep is the global minimum robot-availability time, so
+            # no future order can begin before it.  Fold/discard dead history
+            # while retaining the one-padding-width boundary future checks need.
+            compact_started = time.perf_counter()
+            self.reservations.compact_before(start_timestep)
+            self.inventory.compact_before(start_timestep)
+            self.stats.compaction_seconds += time.perf_counter() - compact_started
 
             schedule = self.planner.plan_order(
                 robot_id,
