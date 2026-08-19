@@ -102,6 +102,81 @@ class TestDirectedColumnPlanner(unittest.TestCase):
         self.assertEqual(state.previous_aisle_id, active_column)
         self.assertTrue(state.remaining_by_sku)
 
+    def test_normal_column_activation_ignores_persistent_adjacency(self):
+        solver = ColumnAwareSolver(
+            self.world,
+            robot_ids=[0],
+            order_ids=[0],
+            max_timesteps=1000,
+        )
+        solver._assign_free_robots()
+        self.assertTrue(solver._select_new_aisle(0))
+
+        stop = solver._current_stop(0)
+        self.assertIsNotNone(stop)
+        solver._persistent_priority_blocked_pallet_ids = lambda robot_id: {
+            stop.pallet_id
+        }
+
+        self.assertTrue(solver._activate_current_stop(0))
+        self.assertEqual(solver.pallet_claims.get(stop.pallet_id), 0)
+
+    def test_previous_column_fallback_alone_applies_persistent_adjacency(self):
+        solver = ColumnAwareSolver(
+            self.world,
+            robot_ids=[0],
+            order_ids=[0],
+            max_timesteps=1000,
+        )
+        solver._assign_free_robots()
+        state = solver.states[0]
+
+        previous_column_id = 0
+        previous_blocker = solver.aisle_planner.layout.columns[
+            previous_column_id
+        ].pallet_ids[0]
+        other_blocker = solver.aisle_planner.layout.columns[1].pallet_ids[0]
+        state.previous_aisle_id = previous_column_id
+
+        calls = []
+
+        def fake_choose_plan(
+            start,
+            remaining_by_sku,
+            *,
+            congestion_by_aisle,
+            unavailable_pallet_ids=(),
+            blocked=(),
+            excluded_aisle_ids=(),
+        ):
+            calls.append(
+                (
+                    set(unavailable_pallet_ids),
+                    set(excluded_aisle_ids),
+                )
+            )
+            return None
+
+        solver.aisle_planner.choose_plan = fake_choose_plan
+        solver._persistent_priority_blocked_pallet_ids = lambda robot_id: {
+            previous_blocker,
+            other_blocker,
+        }
+
+        self.assertFalse(solver._select_new_aisle(0))
+        self.assertEqual(len(calls), 2)
+
+        normal_unavailable, normal_excluded = calls[0]
+        fallback_unavailable, fallback_excluded = calls[1]
+
+        self.assertEqual(normal_excluded, {previous_column_id})
+        self.assertNotIn(previous_blocker, normal_unavailable)
+        self.assertNotIn(other_blocker, normal_unavailable)
+
+        self.assertEqual(fallback_excluded, set())
+        self.assertIn(previous_blocker, fallback_unavailable)
+        self.assertNotIn(other_blocker, fallback_unavailable)
+
 
 if __name__ == "__main__":
     unittest.main()
