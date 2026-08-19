@@ -108,7 +108,7 @@ class PlannerTests(unittest.TestCase):
         self.assertIn((10, 7), planner.geometry.static_blocked)
         self.assertTrue(any((1, 0) in pose.exemptions for pose in carried_poses))
 
-    def test_existing_pallet_reservation_delays_or_avoids_service(self):
+    def test_existing_pallet_reservation_delays_service_past_both_padding_windows(self):
         pallets = (
             PalletSpec(0, (10, 7), 0, 3),
             PalletSpec(1, (11, 7), 1, 3),
@@ -117,7 +117,25 @@ class PlannerTests(unittest.TestCase):
         reservations.reserve_pallet(PalletReservation(0, 0, 10, 9, 99))
         schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
         first_pick = next(a for a in schedule.actions if a.action.value == "pick")
-        self.assertGreater(first_pick.timestep, 10)
+
+        # The committed [0,10] interval is stored as [-1,11].  The new
+        # candidate service interval is also expanded by one timestep, so t=12
+        # still overlaps at t=11.  The first legal raw service timestep is 13.
+        self.assertEqual(first_pick.timestep, 13)
+
+    def test_pallet_retry_timing_scales_with_padding_width(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 3),
+            PalletSpec(1, (11, 7), 1, 3),
+        )
+        planner, reservations, _, _ = self.make_planner(pallets, beam_width=2, padding=2)
+        reservations.reserve_pallet(PalletReservation(0, 0, 10, 9, 99))
+        schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
+        first_pick = next(a for a in schedule.actions if a.action.value == "pick")
+
+        # Raw [0,10] is stored as [-2,12], and the new candidate is itself
+        # expanded by two timesteps.  It must therefore begin at t=15.
+        self.assertEqual(first_pick.timestep, 15)
 
     def test_later_plan_may_take_only_surplus_before_future_reserved_service(self):
         pallets = (
