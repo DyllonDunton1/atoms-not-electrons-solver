@@ -535,25 +535,54 @@ class ColumnAwareSolver(AisleAwareSolver):
         ):
             self._finish_active_aisle(robot_id)
 
+    def _stop_is_locally_adjacency_blocked(self, robot_id: int, pallet_id: int, pickup: Position) -> bool:
+        """Return whether a nearby stop is persistently blocked by higher priority.
+
+        Adjacency is intentionally ignored while a robot is still far from a
+        chosen column. Once it is at most one move from the pickup cell, the
+        conflict is local enough to matter and the stop should be deferred.
+        """
+        robot = self.world.robots[robot_id]
+        distance_to_pickup = abs(robot.position[0] - pickup[0]) + abs(
+            robot.position[1] - pickup[1]
+        )
+        if distance_to_pickup > 1:
+            return False
+        return pallet_id in self._persistent_priority_blocked_pallet_ids(robot_id)
+
     def _replan_active_aisle(self, robot_id: int) -> bool:
-        """Preserve the selected direction and stop order instead of greedy replanning."""
+        """Preserve direction, but defer a locally blocked stop before collision."""
         state = self.states[robot_id]
         if state.active_aisle_id is None or state.aisle_plan is None:
             return self._select_new_aisle(robot_id)
 
         state.greedy_plan_timestep = self.world.timestep
+        if (
+            state.pallet_id is not None
+            and state.pickup is not None
+            and self._stop_is_locally_adjacency_blocked(
+                robot_id,
+                state.pallet_id,
+                state.pickup,
+            )
+        ):
+            state.deferred_pallet_ids.add(state.pallet_id)
+            self._advance_stop(robot_id)
+            return state.aisle_plan is not None
+
         if state.pallet_id is not None and not self._current_stop_is_still_valid(robot_id):
             state.deferred_pallet_ids.add(state.pallet_id)
             self._advance_stop(robot_id)
         return state.aisle_plan is not None
 
     def _activate_current_stop(self, robot_id: int) -> bool:
-        """Claim the current directed stop or defer hard-unavailable work.
+        """Claim the current stop unless hard or locally adjacency-blocked.
 
-        Persistent adjacency is deliberately ignored once a non-previous column
-        has been selected. A far-away robot should not discard a good route just
-        because another robot happens to be beside the pallet now. Claims,
-        docking, and moved pallets remain hard exclusions.
+        Persistent adjacency does not influence the global 48-route choice and
+        does not discard a far-away route. It is enforced only once the robot is
+        within one move of the pickup, which preserves long-range planning while
+        preventing the local goal-swap deadlock seen when two robots occupy the
+        same service lane.
         """
         state = self.states[robot_id]
         stop = self._current_stop(robot_id)
@@ -566,7 +595,11 @@ class ColumnAwareSolver(AisleAwareSolver):
             self._advance_stop(robot_id)
             return False
 
-        unavailable = False
+        unavailable = self._stop_is_locally_adjacency_blocked(
+            robot_id,
+            stop.pallet_id,
+            stop.pickup,
+        )
         pallet = self.world.pallets[stop.pallet_id]
         claim = self.pallet_claims.get(stop.pallet_id)
         if claim is not None and claim != robot_id:
