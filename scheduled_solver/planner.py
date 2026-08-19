@@ -409,10 +409,13 @@ class FullHorizonBeamPlanner:
             if not later:
                 return None
 
-            # pallet_intervals() already returns the stored padded interval, so
-            # the first legal retry is the timestep immediately after its end.
+            # pallet_intervals() contains intervals whose stored endpoints are
+            # already expanded by padding.  A new candidate interval is also
+            # expanded by padding when first_pallet_conflict() checks it, so
+            # its raw start must clear the stored end by one additional padding
+            # width plus one timestep.
             _, end, _, _ = min(later, key=lambda item: (item[1], item[0]))
-            new_min = end + 1
+            new_min = end + self.reservations.padding + 1
             if new_min <= earliest or new_min in tried_goal_times:
                 return None
             tried_goal_times.add(new_min)
