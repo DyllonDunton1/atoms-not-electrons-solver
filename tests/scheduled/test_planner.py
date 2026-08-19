@@ -3,7 +3,13 @@ import unittest
 from scheduled_solver.config import SchedulerConfig
 from scheduled_solver.geometry import build_geometry
 from scheduled_solver.inventory import InventoryTimeline
-from scheduled_solver.models import OrderSpec, PalletReservation, PalletSpec, PlannerStats
+from scheduled_solver.models import (
+    InventoryEvent,
+    OrderSpec,
+    PalletReservation,
+    PalletSpec,
+    PlannerStats,
+)
 from scheduled_solver.planner import FullHorizonBeamPlanner
 from scheduled_solver.reservations import ReservationTable
 
@@ -112,6 +118,69 @@ class PlannerTests(unittest.TestCase):
         schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
         first_pick = next(a for a in schedule.actions if a.action.value == "pick")
         self.assertGreater(first_pick.timestep, 10)
+
+    def test_later_plan_may_take_only_surplus_before_future_reserved_service(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 5),
+            PalletSpec(1, (11, 7), 1, 5),
+        )
+        planner, reservations, inventory, _ = self.make_planner(
+            pallets, beam_width=2, padding=0
+        )
+        inventory.commit([InventoryEvent(100, 0, "pick", 3, 9)])
+        reservations.reserve_pallet(PalletReservation(0, 100, 102, 9, 99))
+
+        schedule = planner.plan_order(0, OrderSpec(0, (0, 0)), (9, 7), 0)
+        picks = [action for action in schedule.actions if action.action.value == "pick"]
+
+        self.assertEqual(len(picks), 2)
+        self.assertTrue(all(action.timestep < 100 for action in picks))
+        self.assertFalse(any(action.action.value == "dock" for action in schedule.actions))
+        self.assertTrue(inventory.events_are_feasible(schedule.inventory_events))
+
+    def test_later_plan_waits_when_full_quantity_would_steal_reserved_stock(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 5),
+            PalletSpec(1, (11, 7), 1, 5),
+        )
+        planner, reservations, inventory, _ = self.make_planner(
+            pallets, beam_width=2, padding=0
+        )
+        inventory.commit([InventoryEvent(100, 0, "pick", 4, 9)])
+        reservations.reserve_pallet(PalletReservation(0, 100, 102, 9, 99))
+
+        schedule = planner.plan_order(0, OrderSpec(0, (0, 0)), (9, 7), 0)
+        picks = [action for action in schedule.actions if action.action.value == "pick"]
+        docks = [action for action in schedule.actions if action.action.value == "dock"]
+
+        # Only one unit is surplus before the earlier commitment.  Because the
+        # SKU is serviced as one complete stop, the failed early partial attempt
+        # is discarded; the robot waits until that commitment is over instead.
+        self.assertTrue(picks)
+        self.assertGreater(min(action.timestep for action in picks), 102)
+        self.assertTrue(docks)
+        self.assertGreater(min(action.timestep for action in docks), 102)
+        self.assertTrue(inventory.events_are_feasible(schedule.inventory_events))
+
+    def test_later_plan_never_refills_pallet_before_future_reserved_service(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 1),
+            PalletSpec(1, (11, 7), 1, 1),
+        )
+        planner, reservations, inventory, _ = self.make_planner(
+            pallets, beam_width=2, padding=0
+        )
+        inventory.commit([InventoryEvent(100, 0, "pick", 1, 9)])
+        reservations.reserve_pallet(PalletReservation(0, 100, 102, 9, 99))
+
+        schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
+        docks = [action for action in schedule.actions if action.action.value == "dock"]
+        picks = [action for action in schedule.actions if action.action.value == "pick"]
+
+        self.assertTrue(docks)
+        self.assertGreater(min(action.timestep for action in docks), 102)
+        self.assertGreater(min(action.timestep for action in picks), 102)
+        self.assertTrue(inventory.events_are_feasible(schedule.inventory_events))
 
     def test_planner_reports_astar_activity(self):
         pallets = (
