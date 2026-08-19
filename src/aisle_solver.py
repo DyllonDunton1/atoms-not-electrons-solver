@@ -112,7 +112,7 @@ class AisleAwareSolver(MultiRobotSolver):
         return dict(congestion)
 
     def _refresh_priority_adjacency_streaks(self) -> None:
-        """Record consecutive timesteps that active robots remain beside pallets."""
+        """Record consecutive timesteps that active rigid footprints border pallets."""
         if self._priority_adjacency_timestep == self.world.timestep:
             return
 
@@ -126,11 +126,11 @@ class AisleAwareSolver(MultiRobotSolver):
         for robot_id in self.active_robot_ids:
             if self._robot_is_permanently_idle(robot_id):
                 continue
-            position = self.world.robots[robot_id].position
-            for adjacent in self.world.adjacent_positions(position):
-                pallet_id = pallet_by_position.get(adjacent)
-                if pallet_id is not None:
-                    current_pairs.add((robot_id, pallet_id))
+            for footprint_cell in self._footprint_cells(robot_id):
+                for adjacent in self.world.adjacent_positions(footprint_cell):
+                    pallet_id = pallet_by_position.get(adjacent)
+                    if pallet_id is not None:
+                        current_pairs.add((robot_id, pallet_id))
 
         self._priority_adjacency_streaks = {
             pair: self._priority_adjacency_streaks.get(pair, 0) + 1
@@ -139,14 +139,14 @@ class AisleAwareSolver(MultiRobotSolver):
         self._priority_adjacency_timestep = self.world.timestep
 
     def _persistent_priority_blocked_pallet_ids(self, robot_id: int) -> Set[int]:
-        """Return pallets persistently occupied by active higher-priority robots."""
+        """Return pallets persistently bordered by higher-priority rigid footprints."""
         self._refresh_priority_adjacency_streaks()
         return {
             pallet_id
             for (higher_priority_id, pallet_id), streak in (
                 self._priority_adjacency_streaks.items()
             )
-            if higher_priority_id < robot_id
+            if self._has_higher_priority(higher_priority_id, robot_id)
             and streak >= PERSISTENT_ADJACENCY_TIMESTEPS
         }
 
