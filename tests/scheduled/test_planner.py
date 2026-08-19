@@ -31,7 +31,7 @@ class PlannerTests(unittest.TestCase):
             stats,
         )
 
-    def test_full_horizon_plan_finishes_simple_order(self):
+    def test_full_horizon_plan_finishes_simple_order_at_closest_fulfillment_x(self):
         pallets = (
             PalletSpec(0, (10, 7), 0, 5),
             PalletSpec(1, (10, 8), 1, 5),
@@ -41,7 +41,10 @@ class PlannerTests(unittest.TestCase):
         planner, _, _, _ = self.make_planner(pallets)
         schedule = planner.plan_order(0, OrderSpec(0, (0, 1)), (9, 10), 0)
         self.assertEqual(schedule.finish_timestep, schedule.poses[-1].timestep)
-        self.assertEqual(schedule.end_position, (0, 0))
+        # Both serviced pallets use the exposed x=9 service lane, so the
+        # minimum-distance fulfillment route is straight up to (9, 0), not the
+        # old robot-id parking target (0, 0).
+        self.assertEqual(schedule.end_position, (9, 0))
         self.assertEqual(sum(a.action.value == "pick" for a in schedule.actions), 2)
         self.assertEqual(schedule.actions[-1].action.value, "fulfill")
         self.assertTrue(schedule.column_visits)
@@ -70,6 +73,22 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("undock", kinds)
         self.assertEqual(kinds.count("pick"), 2)
         self.assertEqual(sum(e.kind == "refill" for e in schedule.inventory_events), 1)
+
+    def test_refill_uses_closest_replenishment_x(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 1),
+            PalletSpec(1, (11, 7), 1, 1),
+        )
+        planner, _, _, _ = self.make_planner(pallets, beam_width=2)
+        schedule = planner.plan_order(0, OrderSpec(0, (0, 0)), (9, 7), 0)
+        refill_pose = next(
+            pose for pose in schedule.poses
+            if pose.center[1] == planner.geometry.replenishment_y
+            and len(pose.footprint_offsets) == 2
+        )
+        # The robot docks from x=9, and the x=9 vertical route is clear, so the
+        # earliest reachable replenishment position keeps that same x.
+        self.assertEqual(refill_pose.center[0], 9)
 
     def test_pallet_home_remains_static_during_refill(self):
         pallets = (
