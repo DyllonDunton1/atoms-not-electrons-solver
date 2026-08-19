@@ -15,12 +15,20 @@ from scheduled_solver.reservations import ReservationTable
 
 
 class PlannerTests(unittest.TestCase):
-    def make_planner(self, pallets, *, beam_width=4, padding=0):
+    def make_planner(
+        self,
+        pallets,
+        *,
+        beam_width=4,
+        candidate_width=8,
+        padding=0,
+    ):
         geometry = build_geometry(pallets, require_24_columns=False)
         reservations = ReservationTable(padding)
         inventory = InventoryTimeline(pallets)
         config = SchedulerConfig(
             beam_width=beam_width,
+            candidate_width=candidate_width,
             reservation_padding=padding,
             path_horizon=256,
             max_path_expansions=100_000,
@@ -47,9 +55,6 @@ class PlannerTests(unittest.TestCase):
         planner, _, _, _ = self.make_planner(pallets)
         schedule = planner.plan_order(0, OrderSpec(0, (0, 1)), (9, 10), 0)
         self.assertEqual(schedule.finish_timestep, schedule.poses[-1].timestep)
-        # Both serviced pallets use the exposed x=9 service lane, so the
-        # minimum-distance fulfillment route is straight up to (9, 0), not the
-        # old robot-id parking target (0, 0).
         self.assertEqual(schedule.end_position, (9, 0))
         self.assertEqual(sum(a.action.value == "pick" for a in schedule.actions), 2)
         self.assertEqual(schedule.actions[-1].action.value, "fulfill")
@@ -67,7 +72,6 @@ class PlannerTests(unittest.TestCase):
         self.assertIn(schedule.column_visits[0].direction, {"up", "down"})
 
     def test_empty_stock_triggers_refill_round_trip(self):
-        # Capacity one and quantity two guarantee one refill after the first pick.
         pallets = (
             PalletSpec(0, (10, 7), 0, 1),
             PalletSpec(1, (11, 7), 1, 1),
@@ -92,8 +96,6 @@ class PlannerTests(unittest.TestCase):
             if pose.center[1] == planner.geometry.replenishment_y
             and len(pose.footprint_offsets) == 2
         )
-        # The robot docks from x=9, and the x=9 vertical route is clear, so the
-        # earliest reachable replenishment position keeps that same x.
         self.assertEqual(refill_pose.center[0], 9)
 
     def test_pallet_home_remains_static_during_refill(self):
@@ -117,10 +119,6 @@ class PlannerTests(unittest.TestCase):
         reservations.reserve_pallet(PalletReservation(0, 0, 10, 9, 99))
         schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
         first_pick = next(a for a in schedule.actions if a.action.value == "pick")
-
-        # The committed [0,10] interval is stored as [-1,11].  The new
-        # candidate service interval is also expanded by one timestep, so t=12
-        # still overlaps at t=11.  The first legal raw service timestep is 13.
         self.assertEqual(first_pick.timestep, 13)
 
     def test_pallet_retry_timing_scales_with_padding_width(self):
@@ -132,9 +130,6 @@ class PlannerTests(unittest.TestCase):
         reservations.reserve_pallet(PalletReservation(0, 0, 10, 9, 99))
         schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 7), 0)
         first_pick = next(a for a in schedule.actions if a.action.value == "pick")
-
-        # Raw [0,10] is stored as [-2,12], and the new candidate is itself
-        # expanded by two timesteps.  It must therefore begin at t=15.
         self.assertEqual(first_pick.timestep, 15)
 
     def test_later_plan_may_take_only_surplus_before_future_reserved_service(self):
@@ -171,9 +166,6 @@ class PlannerTests(unittest.TestCase):
         picks = [action for action in schedule.actions if action.action.value == "pick"]
         docks = [action for action in schedule.actions if action.action.value == "dock"]
 
-        # Only one unit is surplus before the earlier commitment.  Because the
-        # SKU is serviced as one complete stop, the failed early partial attempt
-        # is discarded; the robot waits until that commitment is over instead.
         self.assertTrue(picks)
         self.assertGreater(min(action.timestep for action in picks), 102)
         self.assertTrue(docks)
@@ -200,6 +192,22 @@ class PlannerTests(unittest.TestCase):
         self.assertGreater(min(action.timestep for action in picks), 102)
         self.assertTrue(inventory.events_are_feasible(schedule.inventory_events))
 
+    def test_candidate_preselection_skips_expensive_directed_expansions(self):
+        pallets = (
+            PalletSpec(0, (10, 7), 0, 5),
+            PalletSpec(1, (10, 8), 1, 5),
+            PalletSpec(2, (11, 7), 2, 5),
+            PalletSpec(3, (11, 8), 3, 5),
+        )
+        planner, _, _, stats = self.make_planner(
+            pallets,
+            beam_width=1,
+            candidate_width=1,
+        )
+        schedule = planner.plan_order(0, OrderSpec(0, (0,)), (9, 10), 0)
+        self.assertTrue(schedule.actions)
+        self.assertGreater(stats.candidate_expansions_skipped, 0)
+
     def test_planner_reports_astar_activity(self):
         pallets = (
             PalletSpec(0, (10, 7), 0, 5),
@@ -209,6 +217,8 @@ class PlannerTests(unittest.TestCase):
         planner.plan_order(0, OrderSpec(0, (0,)), (9, 10), 0)
         self.assertGreater(stats.astar_calls, 0)
         self.assertGreater(stats.astar_expansions, 0)
+        self.assertGreaterEqual(stats.astar_seconds, 0.0)
+        self.assertGreaterEqual(stats.candidate_seconds, 0.0)
 
 
 if __name__ == "__main__":
