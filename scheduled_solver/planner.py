@@ -194,6 +194,19 @@ class FullHorizonBeamPlanner:
             return None
         return self._append_path(state, path, robot_id, footprint_offsets, exemptions)
 
+    def _future_committed_pallet_intervals(
+        self,
+        pallet_id: int,
+        timestep: int,
+        robot_id: int,
+    ) -> Tuple[Tuple[int, int, int, int], ...]:
+        """Return earlier-planned service intervals not finished by ``timestep``."""
+        return tuple(
+            interval
+            for interval in self.reservations.pallet_intervals(pallet_id)
+            if interval[2] != robot_id and interval[1] >= timestep
+        )
+
     def _service_once(
         self,
         base: _BeamState,
@@ -223,8 +236,30 @@ class FullHorizonBeamPlanner:
 
         while remaining > 0:
             stock = self.inventory.stock_at(pallet.pallet_id, state.timestep, local_events)
+            inventory_blocked = False
             while stock > 0 and remaining > 0:
                 action_time = state.timestep
+                pick_event = InventoryEvent(
+                    action_time,
+                    pallet.pallet_id,
+                    "pick",
+                    1,
+                    robot_id,
+                )
+
+                # Earlier-planned schedules own the stock they depend on even
+                # when this robot can physically arrive first.  Only surplus
+                # inventory may be consumed before those future commitments.
+                if not self.inventory.pick_is_feasible(
+                    pallet.pallet_id,
+                    action_time,
+                    1,
+                    robot_id,
+                    local_events,
+                ):
+                    inventory_blocked = True
+                    break
+
                 advanced = self._append_fixed(
                     state,
                     robot_id,
@@ -235,14 +270,32 @@ class FullHorizonBeamPlanner:
                 if advanced is None:
                     return None
                 state = advanced
-                local_events.append(
-                    InventoryEvent(action_time, pallet.pallet_id, "pick", 1, robot_id)
-                )
+                local_events.append(pick_event)
                 remaining -= 1
                 stock -= 1
 
             if remaining == 0:
                 break
+
+            future_intervals = self._future_committed_pallet_intervals(
+                pallet.pallet_id,
+                state.timestep,
+                robot_id,
+            )
+
+            # A later-planned robot may borrow surplus stock before an earlier
+            # reservation, but it may not dock/refill that pallet while an
+            # earlier-planned future service still depends on it staying home.
+            # Discard this whole service attempt and let _service_pallet retry
+            # after the protected interval instead of keeping partial picks.
+            if future_intervals:
+                return None
+
+            # Defensive consistency guard: an inventory promise without a
+            # matching physical reservation must not be "repaired" by moving
+            # and refilling the pallet.
+            if inventory_blocked:
+                return None
 
             carried_offsets = frozenset({(0, 0), dock_offset})
             exemptions = {dock_offset: pallet.home}
@@ -332,7 +385,9 @@ class FullHorizonBeamPlanner:
         order_id: int,
     ) -> Optional[_BeamState]:
         min_goal_time: Optional[int] = None
-        for _ in range(6):
+        tried_goal_times = set()
+
+        while True:
             candidate = self._service_once(
                 state,
                 pallet,
@@ -344,21 +399,24 @@ class FullHorizonBeamPlanner:
             )
             if candidate is not None:
                 return candidate
+
             earliest = state.timestep if min_goal_time is None else min_goal_time
-            intervals = self.reservations.pallet_intervals(pallet.pallet_id)
-            later = [
-                interval
-                for interval in intervals
-                if interval[1] >= earliest and interval[2] != robot_id
-            ]
+            later = self._future_committed_pallet_intervals(
+                pallet.pallet_id,
+                earliest,
+                robot_id,
+            )
             if not later:
                 return None
-            _, end, _, _ = min(later, key=lambda item: item[1])
-            new_min = end + self.reservations.padding + 1
-            if min_goal_time is not None and new_min <= min_goal_time:
+
+            # pallet_intervals() already returns the stored padded interval, so
+            # the first legal retry is the timestep immediately after its end.
+            _, end, _, _ = min(later, key=lambda item: (item[1], item[0]))
+            new_min = end + 1
+            if new_min <= earliest or new_min in tried_goal_times:
                 return None
+            tried_goal_times.add(new_min)
             min_goal_time = new_min
-        return None
 
     def _expand_column(
         self,
