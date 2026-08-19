@@ -43,7 +43,7 @@ class Intent:
 
 
 class MultiRobotSolver:
-    """FIFO execution with deterministic one-step robot-ID priority."""
+    """FIFO execution with deterministic one-step pallet-aware priority."""
 
     def __init__(
         self,
@@ -97,6 +97,18 @@ class MultiRobotSolver:
         for sku in order.skus:
             counts[sku] = counts.get(sku, 0) + 1
         return list(counts.items())
+
+    def _priority_key(self, robot_id: int) -> Tuple[int, int]:
+        """Return dynamic traffic priority: more docked pallets, then lower id."""
+        robot = self.world.robots[robot_id]
+        return (-len(robot.docked_pallets), robot_id)
+
+    def _priority_order(self) -> List[int]:
+        """Return robot ids from highest to lowest current traffic priority."""
+        return sorted(self.world.robots, key=self._priority_key)
+
+    def _has_higher_priority(self, first_id: int, second_id: int) -> bool:
+        return self._priority_key(first_id) < self._priority_key(second_id)
 
     def _footprint(self, robot_id: int) -> Footprint:
         return self.spatial.footprint_for_robot(robot_id)
@@ -378,21 +390,21 @@ class MultiRobotSolver:
         raise RuntimeError("Robot state machine did not settle")
 
     def _ignored_docked_pallet_ids_for_path(self, robot_id: int) -> Set[int]:
-        """Return docked pallets that must not distort this robot's preferred path.
+        """Return docked pallets belonging to lower-priority moving robots.
 
         A robot always ignores its own carried pallets because they are already
-        represented by its moving footprint. Active higher-ID robots also have
-        lower priority, so their complete moving assemblies are ignored while
-        this robot chooses its preferred spatial route. Their real current
-        footprint is still enforced before the first move is executed.
+        represented by its moving footprint. Active lower-priority robots are
+        also omitted from preferred-route shaping; physical execution still
+        prevents entering their current rigid footprints this timestep.
         """
         ignored = set(self.world.robots[robot_id].docked_pallets)
         for other_id, other_robot in self.world.robots.items():
-            if other_id <= robot_id:
+            if other_id == robot_id:
                 continue
             if self._robot_is_permanently_idle(other_id):
                 continue
-            ignored.update(other_robot.docked_pallets)
+            if self._has_higher_priority(robot_id, other_id):
+                ignored.update(other_robot.docked_pallets)
         return ignored
 
     def _priority_blocked_cells(
@@ -400,24 +412,24 @@ class MultiRobotSolver:
         robot_id: int,
         committed_destinations: Dict[int, Position],
     ) -> Set[Position]:
-        """Return static blockers used for this robot's one-step route choice.
+        """Return blockers from robots with higher current traffic priority.
 
-        Finished/inactive robots are always obstacles. Active lower-ID robots
-        also act as obstacles because they have priority; both their current
-        rigid footprint and the first move already committed this timestep are
-        blocked. Higher-ID active robots are intentionally omitted from this
-        route calculation and must adapt when their own turn is planned.
+        Finished/inactive robots are always obstacles. Active robots whose
+        priority key sorts ahead of this robot block both their current rigid
+        footprint and any first-step destination already committed this tick.
+        Lower-priority active robots are omitted from route shaping and adapt
+        when their own turn is planned.
         """
         blocked = set(self._permanent_robot_cells(robot_id))
-        for lower_id in sorted(self.world.robots):
-            if lower_id >= robot_id:
+        for other_id in self._priority_order():
+            if other_id == robot_id:
                 break
-            if self._robot_is_permanently_idle(lower_id):
+            if self._robot_is_permanently_idle(other_id):
                 continue
-            blocked.update(self._footprint_cells(lower_id))
-            destination = committed_destinations.get(lower_id)
+            blocked.update(self._footprint_cells(other_id))
+            destination = committed_destinations.get(other_id)
             if destination is not None:
-                blocked.update(self._footprint_cells_at(lower_id, destination))
+                blocked.update(self._footprint_cells_at(other_id, destination))
         return blocked
 
     def _preferred_path(
@@ -444,30 +456,29 @@ class MultiRobotSolver:
         """Reject entering any other robot's current rigid footprint.
 
         This is deliberately stricter than the preferred-path calculation.
-        Lower-ID robots may plan through higher-ID traffic, but the simulator
-        does not allow them to enter cells that are still occupied at the start
-        of the timestep. In that case they wait and replan from the next real
-        world state instead of taking a speculative detour.
+        Higher-priority robots may plan through lower-priority traffic, but the
+        simulator does not allow them to enter cells that are still occupied at
+        the start of the timestep. In that case they wait and replan from the
+        next real world state instead of taking a speculative detour.
         """
         destination_cells = self._footprint_cells_at(robot_id, destination)
         return not bool(destination_cells & self._other_robot_cells(robot_id))
 
     def _plan_moves(self, intents: Dict[int, Intent]) -> List[Action]:
-        """Choose at most one safe move per robot using deterministic ID priority.
+        """Choose at most one safe move per robot using pallet-aware priority.
 
-        Each robot recomputes a full spatial route from the current world state.
-        Only the first step is considered for execution. Lower-ID robots choose
-        first; higher-ID robots treat those committed transitions as obstacles.
-        If a preferred first step is occupied by higher-ID traffic, the robot
-        waits rather than rerouting around a robot that is responsible for
-        clearing the way.
+        Priority is ``(-num_docked_pallets, robot_id)``. A robot carrying a
+        pallet therefore plans before every robot carrying none; ties retain
+        the original lower-ID-first behavior. Each robot recomputes a full
+        spatial route from the current world state and only its first step is
+        considered for execution.
         """
         timestep = self.world.timestep
         reservations = ReservationTable()
         committed_destinations: Dict[int, Position] = {}
         actions: List[Action] = []
 
-        for robot_id in sorted(self.world.robots):
+        for robot_id in self._priority_order():
             robot = self.world.robots[robot_id]
             start = robot.position
             footprint = self._footprint(robot_id)
