@@ -66,10 +66,42 @@ class SolverTests(unittest.TestCase):
             self.assertEqual(schedule.actions[-1].action.value, "fulfill")
             self.assertEqual(schedule.end_position[1], 0)
 
-    def test_dedicated_parking_cells_are_permanent_for_other_robots(self):
+    def test_fulfillment_is_not_forced_to_robot_id_x(self):
         solver = ScheduledSolver(tiny_problem(order_skus=((0,),)), config=config())
-        self.assertFalse(solver.reservations.vertex_is_free([(0, 0)], 10_000, 1))
-        self.assertTrue(solver.reservations.vertex_is_free([(0, 0)], 10_000, 0))
+        solver.solve()
+        schedule = solver.schedules[0]
+        self.assertEqual(schedule.robot_id, 0)
+        self.assertEqual(schedule.end_position, (9, 0))
+        self.assertNotEqual(schedule.end_position, (schedule.robot_id, 0))
+
+    def test_finished_robot_holds_its_actual_fulfillment_cell(self):
+        solver = ScheduledSolver(tiny_problem(order_skus=((0,),)), config=config())
+        solver.solve()
+        schedule = solver.schedules[0]
+        self.assertEqual(
+            solver.reservations.terminal_hold(0),
+            (schedule.end_position, schedule.finish_timestep),
+        )
+        self.assertFalse(
+            solver.reservations.vertex_is_free(
+                [schedule.end_position], schedule.finish_timestep + 100, 1
+            )
+        )
+        self.assertTrue(
+            solver.reservations.vertex_is_free(
+                [schedule.end_position], schedule.finish_timestep + 100, 0
+            )
+        )
+
+    def test_new_order_replaces_same_robots_previous_terminal_hold(self):
+        problem = tiny_problem(order_skus=((0,), (1,)))
+        solver = ScheduledSolver(problem, robot_ids=[0], config=config())
+        solver.solve()
+        final_schedule = solver.schedules[-1]
+        self.assertEqual(
+            solver.reservations.terminal_hold(0),
+            (final_schedule.end_position, final_schedule.finish_timestep),
+        )
 
     def test_inactive_robot_start_becomes_static_obstacle(self):
         problem = tiny_problem(order_skus=((0,),))
