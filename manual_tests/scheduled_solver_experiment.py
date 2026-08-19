@@ -90,6 +90,7 @@ def main() -> None:
                 f"fast-row={solver.stats.row_fast_path_hits} "
                 f"fast-point={solver.stats.point_fast_path_hits} "
                 f"caps={solver.stats.astar_capped_calls} "
+                f"rescues={solver.stats.candidate_full_budget_rescues} "
                 f"maxA*={solver.stats.astar_max_call_expansions}/"
                 f"{solver.stats.astar_max_call_seconds:.2f}s "
                 f"skipped={solver.stats.candidate_expansions_skipped} | "
@@ -167,6 +168,7 @@ def main() -> None:
         f"compaction seconds={solver.stats.compaction_seconds:.2f}, "
         f"row fast paths={solver.stats.row_fast_path_hits}, "
         f"point fast paths={solver.stats.point_fast_path_hits}, "
+        f"candidate full-budget rescues={solver.stats.candidate_full_budget_rescues}, "
         f"candidate expansions skipped={solver.stats.candidate_expansions_skipped}"
     )
     print(format_metrics_report(metrics_report))
