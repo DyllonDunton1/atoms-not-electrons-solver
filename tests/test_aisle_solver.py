@@ -144,6 +144,52 @@ class TestAisleAwareSolver(unittest.TestCase):
         self.assertEqual(state4.remaining_by_sku, {0: 1})
         world.validate()
 
+    def test_persistent_adjacency_uses_pallet_priority_and_full_footprint(self):
+        # R3 carries P1 on its east side. Target P0 is adjacent to the carried
+        # pallet cell, but not to R3's center. Because a docked pallet gives R3
+        # higher traffic priority than pallet-free R1, P0 must become a
+        # persistent blocker for R1 after two consecutive snapshots.
+        target = Pallet(0, (17, 24), 0, 1, 1, (17, 24))
+        carried = Pallet(
+            1,
+            (16, 24),
+            1,
+            1,
+            1,
+            (17, 8),
+            docked_to=3,
+            docked_offset=(1, 0),
+        )
+        problem = ProblemInstance(
+            robots=[
+                Robot(1, (16, 23)),
+                Robot(3, (15, 24), docked_pallets=[1]),
+            ],
+            sku_capacities=[1, 1],
+            pallets=[target, carried],
+            orders=[Order(0, [0]), Order(1, [1])],
+        )
+        world = WorldState(problem)
+        solver = AisleAwareSolver(
+            world,
+            robot_ids=[1, 3],
+            order_ids=[0, 1],
+            max_timesteps=100,
+        )
+
+        self.assertTrue(solver._has_higher_priority(3, 1))
+        self.assertFalse(solver._has_higher_priority(1, 3))
+        self.assertNotIn(target.position, world.adjacent_positions((15, 24)))
+        self.assertIn((16, 24), solver._footprint_cells(3))
+
+        solver._refresh_priority_adjacency_streaks()
+        self.assertNotIn(0, solver._persistent_priority_blocked_pallet_ids(1))
+        solver.simulator.step([])
+        solver._refresh_priority_adjacency_streaks()
+
+        self.assertIn(0, solver._persistent_priority_blocked_pallet_ids(1))
+        world.validate()
+
     def test_persistent_adjacency_does_not_affect_aisle_selection(self):
         # Persistent adjacency is a local greedy traversal rule only. Even when
         # P0 has been beside higher-priority R2 for two timesteps, R4's cheap
