@@ -168,7 +168,17 @@ class SpaceTimeAStar:
         owner: int,
         footprint_offsets: FrozenSet[Offset],
         static_exemptions: Mapping[Offset, Position] = {},
+        goal_hold_steps: int = 0,
+        goal_hold_until: Optional[int] = None,
     ) -> Optional[List[Tuple[Position, int]]]:
+        """Return the earliest reservation-valid arrival anywhere on ``row``.
+
+        Because every row cell shares the same admissible vertical-distance
+        heuristic, the first accepted row state is the minimum-time reachable
+        row position.  ``goal_hold_until`` is used for fulfillment: the chosen
+        endpoint must remain safe through every already-committed future
+        schedule, after which a terminal hold protects it from later planners.
+        """
         self.counters.calls += 1
         max_time = start_time + self.path_horizon
         start_state = (start, start_time)
@@ -187,7 +197,18 @@ class SpaceTimeAStar:
             if expansions > self.max_expansions:
                 return None
             if position[1] == row:
-                return self._reconstruct(parent, state)
+                hold_steps = goal_hold_steps
+                if goal_hold_until is not None and goal_hold_until > timestep:
+                    hold_steps = max(hold_steps, goal_hold_until - timestep)
+                if self._goal_hold_valid(
+                    position,
+                    timestep,
+                    hold_steps,
+                    footprint_offsets,
+                    static_exemptions,
+                    owner,
+                ):
+                    return self._reconstruct(parent, state)
             if timestep >= max_time:
                 continue
             x, y = position
