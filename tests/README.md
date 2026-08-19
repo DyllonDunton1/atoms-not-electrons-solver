@@ -16,7 +16,7 @@ python3 -m unittest tests.test_column_solver -v
 | --- | --- |
 | `test_aisle_solver.py` | Existing 12-island aisle-aware fleet execution, neighboring-pallet coordination, active pallet claims, final same-aisle rescanning, and refill/resume behavior. |
 | `test_aisles.py` | Existing 12-island geometry, scoring, deterministic service plans, pallet availability, and refill-safe pickup choices. |
-| `test_column_solver.py` | Experimental 24-column layout, exposed-side pickup lanes, both directed monotonic routes, distinct-SKU utility, and the no-final-rescan behavior. |
+| `test_column_solver.py` | Experimental 24-column layout, exposed-side pickup lanes, both directed monotonic routes, distinct-SKU utility, no-final-rescan behavior, and previous-column-only persistent-adjacency fallback. |
 | `test_previous_aisle.py` | Previous-unit exclusion and fallback when the previous unit is the only remaining useful choice. |
 | `test_pallet_priority.py` | Dynamic traffic priority where docked-pallet count precedes robot ID. |
 | `test_multi_robot_solver.py` | Multi-robot FIFO integration plus one-step traffic, rigid-footprint, and picking-blocker regressions. |
@@ -61,7 +61,9 @@ The old strategy still performs a final same-aisle rescan before leaving. That b
 - both `up` and `down` plans keep stop `y` values monotonic;
 - useful quantity in the column experiment means **distinct useful SKU count**;
 - completing the final stored stop ends the column pass immediately instead of performing the old final same-unit rescan;
-- remaining work is left for a fresh global route choice, where previous-column exclusion and its existing fallback decide whether re-entry is truly necessary.
+- persistent adjacency does not reject a normal selected column or active stop;
+- persistent adjacency is added only when the solver must fall back into the previous column, and only previous-column pallets are affected;
+- remaining work is left for a fresh global route choice, with the previous column re-entered only when it is both necessary and currently usable.
 
 The directed-column benchmark runner is:
 
