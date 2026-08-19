@@ -1,0 +1,107 @@
+"""Focused tests for the 24-column / 48-directed-route collection strategy."""
+
+from collections import Counter
+from pathlib import Path
+import unittest
+
+from src.column_solver import (
+    DOWN,
+    UP,
+    ColumnAwareSolver,
+    DirectedColumnPlanner,
+)
+from src.parser import parse_problem
+from src.world import WorldState
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BIG_ORDER_PATH = REPO_ROOT / "source_material" / "BIG_ORDER.txt"
+
+
+class TestDirectedColumnPlanner(unittest.TestCase):
+    def setUp(self):
+        self.world = WorldState(parse_problem(BIG_ORDER_PATH))
+        self.planner = DirectedColumnPlanner(self.world)
+
+    def test_layout_splits_twelve_islands_into_twenty_four_columns(self):
+        self.assertEqual(len(self.planner.layout.columns), 24)
+        self.assertEqual(len(self.planner.layout.pallet_to_column), 240)
+
+        for column in self.planner.layout.columns:
+            self.assertEqual(len(column.pallet_ids), 10)
+            self.assertEqual(len(column.home_positions), 10)
+            self.assertTrue(all(x == column.pallet_x for x, _ in column.home_positions))
+            self.assertTrue(
+                all(abs(column.service_x - x) == 1 for x, _ in column.home_positions)
+            )
+            self.assertEqual(
+                [position[1] for position in column.home_positions],
+                sorted(position[1] for position in column.home_positions),
+            )
+
+    def test_both_directions_use_one_exposed_lane_and_monotonic_stops(self):
+        column = self.planner.layout.columns[0]
+        remaining = Counter(
+            self.world.pallets[pallet_id].sku for pallet_id in column.pallet_ids
+        )
+        # Make quantity deliberately larger than one so the plan's utility can
+        # be checked as distinct-SKU count rather than requested item count.
+        remaining = {sku: count + 4 for sku, count in remaining.items()}
+        start = (column.service_x, 18)
+
+        up = self.planner.plan_column_direction(
+            column.column_id,
+            UP,
+            start,
+            remaining,
+        )
+        down = self.planner.plan_column_direction(
+            column.column_id,
+            DOWN,
+            start,
+            remaining,
+        )
+
+        self.assertIsNotNone(up)
+        self.assertIsNotNone(down)
+        for plan, reverse in ((up, True), (down, False)):
+            ys = [stop.pickup[1] for stop in plan.stops]
+            self.assertEqual(ys, sorted(ys, reverse=reverse))
+            self.assertTrue(
+                all(stop.pickup[0] == column.service_x for stop in plan.stops)
+            )
+            self.assertEqual(plan.useful_sku_count, len(plan.stops))
+            self.assertEqual(plan.useful_quantity, len(plan.stops))
+            span = abs(ys[-1] - ys[0]) if len(ys) > 1 else 0
+            self.assertGreaterEqual(plan.planned_distance, span)
+
+    def test_completed_column_pass_does_not_final_rescan(self):
+        solver = ColumnAwareSolver(
+            self.world,
+            robot_ids=[0],
+            order_ids=[0],
+            max_timesteps=1000,
+        )
+        solver._assign_free_robots()
+        self.assertTrue(solver._select_new_aisle(0))
+
+        state = solver.states[0]
+        active_column = state.active_aisle_id
+        self.assertIsNotNone(active_column)
+        self.assertIsNotNone(state.aisle_plan)
+        self.assertTrue(state.remaining_by_sku)
+
+        state.aisle_stop_index = len(state.aisle_plan.stops) - 1
+        solver._advance_stop(0)
+
+        # Remaining work is intentionally left for a new global route choice.
+        # The just-finished column is remembered and excluded unless the normal
+        # fallback later determines it is the only useful choice.
+        self.assertIsNone(state.active_aisle_id)
+        self.assertIsNone(state.aisle_plan)
+        self.assertEqual(state.previous_aisle_id, active_column)
+        self.assertTrue(state.remaining_by_sku)
+
+
+if __name__ == "__main__":
+    unittest.main()
