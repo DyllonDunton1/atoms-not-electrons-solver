@@ -38,6 +38,7 @@ def main() -> None:
     parser.add_argument("--padding", type=int, default=1)
     parser.add_argument("--path-horizon", type=int, default=512)
     parser.add_argument("--max-path-expansions", type=int, default=250_000)
+    parser.add_argument("--candidate-max-path-expansions", type=int, default=20_000)
     args = parser.parse_args()
 
     if args.beam_width <= 0:
@@ -46,6 +47,10 @@ def main() -> None:
         parser.error("--candidate-width must be positive")
     if args.padding < 0:
         parser.error("--padding must be nonnegative")
+    if args.max_path_expansions <= 0:
+        parser.error("--max-path-expansions must be positive")
+    if args.candidate_max_path_expansions <= 0:
+        parser.error("--candidate-max-path-expansions must be positive")
 
     robot_ids = list(range(args.robots))
     order_ids = list(range(args.orders))
@@ -55,6 +60,7 @@ def main() -> None:
         reservation_padding=args.padding,
         path_horizon=args.path_horizon,
         max_path_expansions=args.max_path_expansions,
+        candidate_max_path_expansions=args.candidate_max_path_expansions,
         max_beam_depth=64,
         require_24_columns=True,
     )
@@ -71,6 +77,7 @@ def main() -> None:
     def progress(done, total, schedule):
         if done <= 5 or done % 10 == 0 or done == total:
             elapsed = time.perf_counter() - run_started
+            worst = solver.stats.astar_worst_context or "-"
             print(
                 f"planned {done}/{total} orders | r{schedule.robot_id} "
                 f"order={schedule.order_id} finish={schedule.finish_timestep} "
@@ -81,13 +88,19 @@ def main() -> None:
                 f"cand={solver.stats.candidate_seconds:.1f}s "
                 f"compact={solver.stats.compaction_seconds:.2f}s | "
                 f"fast-row={solver.stats.row_fast_path_hits} "
-                f"skipped={solver.stats.candidate_expansions_skipped}",
+                f"fast-point={solver.stats.point_fast_path_hits} "
+                f"caps={solver.stats.astar_capped_calls} "
+                f"maxA*={solver.stats.astar_max_call_expansions}/"
+                f"{solver.stats.astar_max_call_seconds:.2f}s "
+                f"skipped={solver.stats.candidate_expansions_skipped} | "
+                f"worst={worst}",
                 flush=True,
             )
 
     print(
         f"Scheduling {args.orders} orders with {args.robots} robots, "
         f"beam={args.beam_width}, candidates={args.candidate_width}, "
+        f"candidate-A*-cap={args.candidate_max_path_expansions}, "
         f"padding={args.padding}...",
         flush=True,
     )
@@ -95,7 +108,8 @@ def main() -> None:
 
     output_stem = (
         f"scheduled_v1_full_horizon_beam{args.beam_width}_cand{args.candidate_width}_"
-        f"pad{args.padding}_{args.robots}r_{args.orders}o"
+        f"cap{args.candidate_max_path_expansions}_pad{args.padding}_"
+        f"{args.robots}r_{args.orders}o"
     )
     outputs_dir = REPO_ROOT / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -144,10 +158,15 @@ def main() -> None:
         f"A* calls={solver.stats.astar_calls}, "
         f"A* expansions={solver.stats.astar_expansions}, "
         f"A* seconds={solver.stats.astar_seconds:.2f}, "
+        f"A* capped calls={solver.stats.astar_capped_calls}, "
+        f"max A* call={solver.stats.astar_max_call_expansions} expansions/"
+        f"{solver.stats.astar_max_call_seconds:.2f}s, "
+        f"worst A*={solver.stats.astar_worst_context!r}, "
         f"inventory seconds={solver.stats.inventory_seconds:.2f}, "
         f"candidate seconds={solver.stats.candidate_seconds:.2f}, "
         f"compaction seconds={solver.stats.compaction_seconds:.2f}, "
         f"row fast paths={solver.stats.row_fast_path_hits}, "
+        f"point fast paths={solver.stats.point_fast_path_hits}, "
         f"candidate expansions skipped={solver.stats.candidate_expansions_skipped}"
     )
     print(format_metrics_report(metrics_report))
