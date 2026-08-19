@@ -50,6 +50,29 @@ class ReservationTests(unittest.TestCase):
         self.assertFalse(table.vertex_is_free([(0, 0)], 10_000, 1))
         self.assertTrue(table.vertex_is_free([(0, 0)], 10_000, 0))
 
+    def test_terminal_hold_begins_at_finish_time(self):
+        table = ReservationTable(padding=1)
+        table.set_terminal_hold((9, 0), 20, 0)
+        self.assertTrue(table.vertex_is_free([(9, 0)], 19, 1))
+        self.assertFalse(table.vertex_is_free([(9, 0)], 20, 1))
+        self.assertFalse(table.vertex_is_free([(9, 0)], 10_000, 1))
+        self.assertTrue(table.vertex_is_free([(9, 0)], 10_000, 0))
+
+    def test_same_robot_replaces_its_old_terminal_hold(self):
+        table = ReservationTable(padding=1)
+        table.set_terminal_hold((9, 0), 20, 0)
+        table.set_terminal_hold((30, 0), 50, 0)
+        self.assertEqual(table.terminal_hold(0), ((30, 0), 50))
+        self.assertTrue(table.vertex_is_free([(9, 0)], 100, 1))
+        self.assertFalse(table.vertex_is_free([(30, 0)], 100, 1))
+
+    def test_terminal_hold_rejects_future_finite_conflict(self):
+        table = ReservationTable(padding=0)
+        table.reserve_pose([(9, 0)], 30, 1)
+        self.assertFalse(table.terminal_hold_is_free((9, 0), 20, 0))
+        with self.assertRaises(ReservationConflict):
+            table.set_terminal_hold((9, 0), 20, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
