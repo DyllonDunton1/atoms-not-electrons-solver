@@ -7,6 +7,7 @@ import time
 from collections import deque
 from typing import Callable, Dict, Iterable, List, Optional
 
+from .bounded_planner import BudgetAwareFullHorizonBeamPlanner
 from .config import SchedulerConfig
 from .geometry import WarehouseGeometry, build_geometry
 from .inventory import InventoryTimeline
@@ -18,7 +19,6 @@ from .models import (
     ProblemInstance,
     RobotScheduleState,
 )
-from .planner import FullHorizonBeamPlanner
 from .reservations import ReservationConflict, ReservationTable
 from .validation import validate_action_uniqueness, validate_schedule_structure
 
@@ -71,7 +71,7 @@ class ScheduledSolver:
         self.reservations = ReservationTable(config.reservation_padding)
         self.inventory = InventoryTimeline(problem.pallets)
         self.stats = PlannerStats()
-        self.planner = FullHorizonBeamPlanner(
+        self.planner = BudgetAwareFullHorizonBeamPlanner(
             self.geometry,
             problem.pallets,
             self.reservations,
