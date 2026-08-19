@@ -12,6 +12,7 @@ class SchedulerConfig:
     reservation_padding: int = 1
     path_horizon: int = 512
     max_path_expansions: int = 250_000
+    candidate_max_path_expansions: int = 20_000
     max_beam_depth: int = 64
     require_24_columns: bool = True
 
@@ -26,5 +27,7 @@ class SchedulerConfig:
             raise ValueError("path_horizon must be positive")
         if self.max_path_expansions <= 0:
             raise ValueError("max_path_expansions must be positive")
+        if self.candidate_max_path_expansions <= 0:
+            raise ValueError("candidate_max_path_expansions must be positive")
         if self.max_beam_depth <= 0:
             raise ValueError("max_beam_depth must be positive")
